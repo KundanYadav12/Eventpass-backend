@@ -1,5 +1,6 @@
 const { query } = require('../config/db');
 const { logAudit } = require('./AuditService');
+const { formatMySqlDateTime } = require('../utils/timeUtil');
 
 async function getEvents({ status = '', search = '' } = {}) {
   const whereConditions = [];
@@ -76,10 +77,13 @@ async function createEvent({ eventName, eventCode, description, venue, startDate
     throw new Error(`Event with code '${cleanCode}' already exists`);
   }
 
+  const formattedStart = formatMySqlDateTime(startDate);
+  const formattedEnd = formatMySqlDateTime(endDate);
+
   const result = await query(
     `INSERT INTO events (event_name, event_code, description, venue, event_start_date, event_end_date, status, barcode_type, sticker_width_mm, sticker_height_mm, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-    [eventName.trim(), cleanCode, description || '', venue || '', startDate, endDate, status, barcodeType || 'QR_CODE', stickerWidthMm || 38, stickerHeightMm || 50]
+    [eventName.trim(), cleanCode, description || '', venue || '', formattedStart, formattedEnd, status, barcodeType || 'QR_CODE', stickerWidthMm || 38, stickerHeightMm || 50]
   );
 
   const eventId = result.insertId;
@@ -90,7 +94,7 @@ async function createEvent({ eventName, eventCode, description, venue, startDate
     action: 'CREATE_EVENT',
     entity: 'EVENT',
     entityId: eventId,
-    newValue: { eventName, eventCode: cleanCode, startDate, endDate, status, barcodeType },
+    newValue: { eventName, eventCode: cleanCode, startDate: formattedStart, endDate: formattedEnd, status, barcodeType },
     ipAddress,
     userAgent
   });
@@ -114,6 +118,9 @@ async function updateEvent(id, { eventName, eventCode, description, venue, start
     }
   }
 
+  const formattedStart = startDate !== undefined ? formatMySqlDateTime(startDate) : oldEvent.event_start_date;
+  const formattedEnd = endDate !== undefined ? formatMySqlDateTime(endDate) : oldEvent.event_end_date;
+
   await query(
     `UPDATE events
      SET event_name = COALESCE(?, event_name),
@@ -128,7 +135,7 @@ async function updateEvent(id, { eventName, eventCode, description, venue, start
          sticker_height_mm = COALESCE(?, sticker_height_mm),
          updated_at = NOW()
      WHERE id = ?`,
-    [eventName, cleanCode, description, venue, startDate, endDate, status, barcodeType, stickerWidthMm, stickerHeightMm, id]
+    [eventName, cleanCode, description, venue, formattedStart, formattedEnd, status, barcodeType, stickerWidthMm, stickerHeightMm, id]
   );
 
   await logAudit({

@@ -1,6 +1,7 @@
 const { query, withTransaction } = require('../config/db');
 const { generatePassCode, generateHmacSignature } = require('../utils/cryptoUtil');
 const { logAudit } = require('./AuditService');
+const { formatMySqlDateTime } = require('../utils/timeUtil');
 
 /**
  * Get paginated list of passes with event scoping and dynamic filters
@@ -296,8 +297,8 @@ async function renewPass(id, { validFrom, validUntil, resetUsage = false, resetS
   }
 
   const oldPass = existing[0];
-  const newValidFrom = validFrom || oldPass.valid_from;
-  const newValidUntil = validUntil || oldPass.valid_until;
+  const newValidFrom = validFrom !== undefined ? formatMySqlDateTime(validFrom) : oldPass.valid_from;
+  const newValidUntil = validUntil !== undefined ? formatMySqlDateTime(validUntil) : oldPass.valid_until;
   const newStatus = resetStatus ? 'active' : oldPass.status;
   const newScanCount = resetUsage ? 0 : oldPass.scan_count;
   const newFirstScanned = resetUsage ? null : oldPass.first_scanned_at;
@@ -340,6 +341,9 @@ async function bulkRenewPasses({ passIds = [], validFrom, validUntil, resetUsage
     throw new Error('No pass IDs provided for bulk renewal');
   }
 
+  const formattedValidFrom = validFrom !== undefined ? formatMySqlDateTime(validFrom) : undefined;
+  const formattedValidUntil = validUntil !== undefined ? formatMySqlDateTime(validUntil) : undefined;
+
   const results = await withTransaction(async (conn) => {
     let updatedCount = 0;
 
@@ -348,8 +352,8 @@ async function bulkRenewPasses({ passIds = [], validFrom, validUntil, resetUsage
       if (rows.length === 0) continue;
 
       const oldPass = rows[0];
-      const newValidFrom = validFrom || oldPass.valid_from;
-      const newValidUntil = validUntil || oldPass.valid_until;
+      const newValidFrom = formattedValidFrom || oldPass.valid_from;
+      const newValidUntil = formattedValidUntil || oldPass.valid_until;
       const newStatus = resetStatus ? 'active' : oldPass.status;
       const newScanCount = resetUsage ? 0 : oldPass.scan_count;
 

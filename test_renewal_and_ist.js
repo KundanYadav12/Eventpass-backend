@@ -1,3 +1,4 @@
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const { query } = require('./src/config/db');
 const { processScan } = require('./src/services/ScanService');
 const { generateHmacSignature } = require('./src/utils/cryptoUtil');

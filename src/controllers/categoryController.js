@@ -1,5 +1,6 @@
 const { query } = require('../config/db');
 const { logAudit } = require('../services/AuditService');
+const { formatMySqlDateTime } = require('../utils/timeUtil');
 
 async function getCategories(req, res, next) {
   try {
@@ -67,8 +68,10 @@ async function createCategory(req, res, next) {
 
     const behavior = (scanBehavior || 'ONE_TIME').toUpperCase() === 'RENEWABLE' ? 'RENEWABLE' : 'ONE_TIME';
     const renTime = renewalTime || '01:00';
-    const renActiveFrom = behavior === 'RENEWABLE' ? (renewalActiveFrom || validFrom) : null;
-    const renActiveUntil = behavior === 'RENEWABLE' ? (renewalActiveUntil || validUntil) : null;
+    const formattedValidFrom = formatMySqlDateTime(validFrom);
+    const formattedValidUntil = formatMySqlDateTime(validUntil);
+    const formattedRenActiveFrom = behavior === 'RENEWABLE' ? (formatMySqlDateTime(renewalActiveFrom) || formattedValidFrom) : null;
+    const formattedRenActiveUntil = behavior === 'RENEWABLE' ? (formatMySqlDateTime(renewalActiveUntil) || formattedValidUntil) : null;
 
     const result = await query(
       `INSERT INTO pass_categories (
@@ -79,8 +82,8 @@ async function createCategory(req, res, next) {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
         targetEventId, code.trim().toLowerCase(), categoryPrefix || '', name.trim(), description || '',
-        validFrom, validUntil, totalQuantity, maxDailyScans,
-        behavior, renTime, renActiveFrom, renActiveUntil,
+        formattedValidFrom, formattedValidUntil, totalQuantity, maxDailyScans,
+        behavior, renTime, formattedRenActiveFrom, formattedRenActiveUntil,
         price
       ]
     );
@@ -92,7 +95,7 @@ async function createCategory(req, res, next) {
       action: 'CREATE_CATEGORY',
       entity: 'PASS_CATEGORY',
       entityId: result.insertId,
-      newValue: { eventId: targetEventId, name, code, validFrom, validUntil, scanBehavior: behavior, renewalTime: renTime },
+      newValue: { eventId: targetEventId, name, code, validFrom: formattedValidFrom, validUntil: formattedValidUntil, scanBehavior: behavior, renewalTime: renTime },
       ipAddress,
       userAgent
     });
@@ -137,11 +140,14 @@ async function updateCategory(req, res, next) {
       ? ((scanBehavior || 'ONE_TIME').toUpperCase() === 'RENEWABLE' ? 'RENEWABLE' : 'ONE_TIME')
       : oldVal.scan_behavior;
     const renTime = renewalTime !== undefined ? (renewalTime || '01:00') : oldVal.renewal_time;
-    const renActiveFrom = behavior === 'RENEWABLE'
-      ? (renewalActiveFrom !== undefined ? renewalActiveFrom : (oldVal.renewal_active_from || validFrom || oldVal.valid_from))
+    
+    const formattedValidFrom = validFrom !== undefined ? formatMySqlDateTime(validFrom) : oldVal.valid_from;
+    const formattedValidUntil = validUntil !== undefined ? formatMySqlDateTime(validUntil) : oldVal.valid_until;
+    const formattedRenActiveFrom = behavior === 'RENEWABLE'
+      ? (renewalActiveFrom !== undefined ? formatMySqlDateTime(renewalActiveFrom) : (oldVal.renewal_active_from || formattedValidFrom))
       : null;
-    const renActiveUntil = behavior === 'RENEWABLE'
-      ? (renewalActiveUntil !== undefined ? renewalActiveUntil : (oldVal.renewal_active_until || validUntil || oldVal.valid_until))
+    const formattedRenActiveUntil = behavior === 'RENEWABLE'
+      ? (renewalActiveUntil !== undefined ? formatMySqlDateTime(renewalActiveUntil) : (oldVal.renewal_active_until || formattedValidUntil))
       : null;
 
     await query(
@@ -160,11 +166,23 @@ async function updateCategory(req, res, next) {
            updated_at = NOW()
        WHERE id = ?`,
       [
-        name, categoryPrefix, description, validFrom, validUntil, maxDailyScans,
-        behavior, renTime, renActiveFrom, renActiveUntil,
+        name, categoryPrefix, description, formattedValidFrom, formattedValidUntil, maxDailyScans,
+        behavior, renTime, formattedRenActiveFrom, formattedRenActiveUntil,
         price, id
       ]
     );
+
+    // Also update any existing passes under this category if valid_from or valid_until changed
+    if (formattedValidFrom || formattedValidUntil) {
+      await query(
+        `UPDATE passes
+         SET valid_from = COALESCE(?, valid_from),
+             valid_until = COALESCE(?, valid_until),
+             updated_at = NOW()
+         WHERE category_id = ?`,
+        [formattedValidFrom, formattedValidUntil, id]
+      );
+    }
 
     await logAudit({
       eventId: oldVal.event_id,
@@ -174,7 +192,7 @@ async function updateCategory(req, res, next) {
       entity: 'PASS_CATEGORY',
       entityId: id,
       oldValue: oldVal,
-      newValue: { name, categoryPrefix, description, validFrom, validUntil, maxDailyScans, scanBehavior: behavior, renewalTime: renTime, price },
+      newValue: { name, categoryPrefix, description, validFrom: formattedValidFrom, validUntil: formattedValidUntil, maxDailyScans, scanBehavior: behavior, renewalTime: renTime, price },
       ipAddress,
       userAgent
     });

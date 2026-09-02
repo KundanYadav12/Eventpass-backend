@@ -10,6 +10,43 @@ const IST_TIMEZONE = 'Asia/Kolkata';
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 mins in ms
 
 /**
+ * Convert an IST date input (string or Date) to UTC Date object.
+ * If input already has a timezone indicator (Z or +/-offset), it parses it directly.
+ * If input is a local IST string (e.g. "2026-09-02T10:00" or "2026-09-02 10:00:00"),
+ * it interprets it as IST and shifts it to UTC.
+ */
+function istToUTC(dateInput) {
+  if (!dateInput) return null;
+  if (dateInput instanceof Date) return new Date(dateInput.getTime());
+
+  if (typeof dateInput === 'string') {
+    const trimmed = dateInput.trim();
+    if (!trimmed) return null;
+
+    // Has explicit timezone indicator (e.g. 'Z', '+05:30')
+    if (/[Zz]|[+-]\d{2}:\d{2}$/.test(trimmed)) {
+      return new Date(trimmed);
+    }
+
+    // Match YYYY-MM-DDTHH:mm, YYYY-MM-DD HH:mm:ss, etc.
+    const match = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+    if (match) {
+      const year = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10) - 1;
+      const day = parseInt(match[3], 10);
+      const hour = parseInt(match[4] || '0', 10);
+      const minute = parseInt(match[5] || '0', 10);
+      const second = parseInt(match[6] || '0', 10);
+
+      const utcMs = Date.UTC(year, month, day, hour, minute, second) - IST_OFFSET_MS;
+      return new Date(utcMs);
+    }
+  }
+
+  return new Date(dateInput);
+}
+
+/**
  * Convert any Date, timestamp, or MySQL datetime string into a JavaScript Date object in UTC
  */
 function parseDate(dateInput) {
@@ -17,7 +54,7 @@ function parseDate(dateInput) {
   if (dateInput instanceof Date) return new Date(dateInput.getTime());
   
   if (typeof dateInput === 'string') {
-    // If format is 'YYYY-MM-DD HH:mm:ss' (MySQL default string without timezone indicator)
+    // If format is 'YYYY-MM-DD HH:mm:ss' (MySQL default string without timezone indicator, which is stored in UTC)
     if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(dateInput)) {
       return new Date(dateInput.replace(' ', 'T') + 'Z');
     }
@@ -224,16 +261,19 @@ function hasScannedInCurrentCycle(lastScannedAt, cycleStart) {
 }
 
 /**
- * Formats a Date object to MySQL DATETIME format (YYYY-MM-DD HH:mm:ss)
+ * Formats a Date object or IST input string to MySQL DATETIME format in UTC (YYYY-MM-DD HH:mm:ss)
  */
 function formatMySqlDateTime(dateInput = new Date()) {
-  const d = parseDate(dateInput);
+  if (!dateInput) return null;
+  const d = (dateInput instanceof Date) ? dateInput : istToUTC(dateInput);
+  if (!d || isNaN(d.getTime())) return null;
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
 
 module.exports = {
   IST_TIMEZONE,
+  istToUTC,
   parseDate,
   getISTComponents,
   formatDateTimeIST,
