@@ -4,7 +4,8 @@
  * Manages dynamic printer settings in database:
  * - Selected active printer name (Default: 'TSC TE244')
  * - Selected command language (TSPL, ZPL)
- * - Media stock dimensions & calibration values
+ * - Default barcode symbology ('QR_CODE', 'CODE128', 'CODE39')
+ * - Media stock dimensions (Default: 38mm x 50mm) & calibration values
  * - Gateway Mode & Pairing API Key
  * - Venue Printers catalog
  */
@@ -25,12 +26,13 @@ async function getSettings(eventId = null) {
     return rows[0];
   }
 
-  // Fallback defaults
+  // Fallback defaults: 38mm width x 50mm height
   return {
     id: 1,
     printer_name: 'TSC TE244',
     command_language: 'TSPL',
-    stock_width_mm: 50,
+    barcode_type: 'QR_CODE',
+    stock_width_mm: 38,
     stock_height_mm: 50,
     dual_column: 1,
     gap_mm: 3.00,
@@ -49,7 +51,9 @@ async function updateSettings(settingsData, eventId = null) {
   const {
     printer_name = 'TSC TE244',
     command_language = 'TSPL',
-    stock_width_mm = 50,
+    barcode_type = 'QR_CODE',
+    barcode_pattern = barcode_type,
+    stock_width_mm = 38,
     stock_height_mm = 50,
     dual_column = 1,
     gap_mm = 3.00,
@@ -59,6 +63,8 @@ async function updateSettings(settingsData, eventId = null) {
     gateway_mode = 0,
     gateway_api_key = 'eventgen_gateway_sec_key_9981'
   } = settingsData;
+
+  const targetBarcodePattern = (barcode_pattern || barcode_type || 'QR_CODE').toUpperCase();
 
   const existing = await query(
     'SELECT id FROM printer_settings WHERE event_id = ? OR (event_id IS NULL AND ? IS NULL) LIMIT 1',
@@ -70,6 +76,7 @@ async function updateSettings(settingsData, eventId = null) {
       `UPDATE printer_settings SET 
         printer_name = ?, 
         command_language = ?, 
+        barcode_type = ?,
         stock_width_mm = ?, 
         stock_height_mm = ?, 
         dual_column = ?, 
@@ -84,13 +91,14 @@ async function updateSettings(settingsData, eventId = null) {
       [
         printer_name,
         command_language.toUpperCase(),
-        stock_width_mm,
-        stock_height_mm,
+        targetBarcodePattern,
+        parseFloat(stock_width_mm) || 38,
+        parseFloat(stock_height_mm) || 50,
         dual_column ? 1 : 0,
-        gap_mm,
-        speed,
-        density,
-        direction,
+        parseFloat(gap_mm) || 3.00,
+        parseInt(speed, 10) || 4,
+        parseInt(density, 10) || 8,
+        parseInt(direction, 10) || 1,
         gateway_mode ? 1 : 0,
         gateway_api_key,
         existing[0].id
@@ -99,19 +107,20 @@ async function updateSettings(settingsData, eventId = null) {
   } else {
     await query(
       `INSERT INTO printer_settings 
-        (event_id, printer_name, command_language, stock_width_mm, stock_height_mm, dual_column, gap_mm, speed, density, direction, gateway_mode, gateway_api_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (event_id, printer_name, command_language, barcode_type, stock_width_mm, stock_height_mm, dual_column, gap_mm, speed, density, direction, gateway_mode, gateway_api_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         eventId,
         printer_name,
         command_language.toUpperCase(),
-        stock_width_mm,
-        stock_height_mm,
+        targetBarcodePattern,
+        parseFloat(stock_width_mm) || 38,
+        parseFloat(stock_height_mm) || 50,
         dual_column ? 1 : 0,
-        gap_mm,
-        speed,
-        density,
-        direction,
+        parseFloat(gap_mm) || 3.00,
+        parseInt(speed, 10) || 4,
+        parseInt(density, 10) || 8,
+        parseInt(direction, 10) || 1,
         gateway_mode ? 1 : 0,
         gateway_api_key
       ]

@@ -17,8 +17,9 @@ const categoryController = require('../controllers/categoryController');
 const userController = require('../controllers/userController');
 const messageController = require('../controllers/messageController');
 const auditController = require('../controllers/auditController');
+const systemController = require('../controllers/systemController');
 
-// 1. Health Check
+// 1. Health Check & Platform Settings
 router.get('/health', (req, res) => {
   res.json({
     status: 'online',
@@ -28,6 +29,9 @@ router.get('/health', (req, res) => {
     time: new Date().toISOString()
   });
 });
+
+router.get('/system/settings', systemController.getSystemSettings);
+router.put('/system/settings', authenticateToken, requireRole('SUPERADMIN'), systemController.updateSystemSettings);
 
 // 2. Authentication Routes
 router.post('/auth/login', authLimiter, authController.login);
@@ -50,41 +54,41 @@ router.get('/dashboard/stats', authenticateToken, scopeEventAccess, dashboardCon
 // 5. Pass Management Routes
 router.get('/passes', authenticateToken, scopeEventAccess, passController.getPasses);
 router.get('/passes/:id', authenticateToken, scopeEventAccess, passController.getPassById);
-router.post('/passes/generate', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), scopeEventAccess, passController.generatePasses);
-router.post('/passes/:id/renew', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), passController.renewPass);
-router.post('/passes/bulk-renew', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), passController.bulkRenewPasses);
-router.post('/passes/:id/void', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), passController.voidPass);
-router.post('/passes/:id/reissue', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), passController.reissuePass);
+router.post('/passes/generate', authenticateToken, requireRole('SUPERADMIN'), scopeEventAccess, passController.generatePasses);
+router.post('/passes/:id/renew', authenticateToken, requireRole('SUPERADMIN'), passController.renewPass);
+router.post('/passes/bulk-renew', authenticateToken, requireRole('SUPERADMIN'), passController.bulkRenewPasses);
+router.post('/passes/:id/void', authenticateToken, requireRole('SUPERADMIN'), passController.voidPass);
+router.post('/passes/:id/reissue', authenticateToken, requireRole('SUPERADMIN'), passController.reissuePass);
 
 // 6. Scan Routes
 router.post('/scan', scanLimiter, optionalAuth, scanController.scan);
 router.get('/scan/history', authenticateToken, scopeEventAccess, scanController.getScanHistory);
 
-// 7. Category Routes
+// 7. Category Routes (Admin: View-Only; SuperAdmin: Create/Edit/Delete)
 router.get('/categories', authenticateToken, scopeEventAccess, categoryController.getCategories);
-router.post('/categories', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), scopeEventAccess, categoryController.createCategory);
-router.put('/categories/:id', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), categoryController.updateCategory);
+router.post('/categories', authenticateToken, requireRole('SUPERADMIN'), scopeEventAccess, categoryController.createCategory);
+router.put('/categories/:id', authenticateToken, requireRole('SUPERADMIN'), categoryController.updateCategory);
 router.delete('/categories/:id', authenticateToken, requireRole('SUPERADMIN'), categoryController.deleteCategory);
 
-// 8. Print Batch Management & TSC TE244 Hardware Routes
+// 8. Print Batch Management & TSC TE244 Hardware Routes (SuperAdmin Only)
 router.get('/print/batches', authenticateToken, scopeEventAccess, printController.getBatches);
-router.post('/print/batches', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), scopeEventAccess, printController.createBatch);
+router.post('/print/batches', authenticateToken, requireRole('SUPERADMIN'), scopeEventAccess, printController.createBatch);
 router.get('/print/batches/:id', authenticateToken, printController.getBatchById);
-router.post('/print/batches/:id/process', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), printController.processChunk);
-router.post('/print/batches/:id/pause', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), printController.pauseBatch);
-router.post('/print/batches/:id/resume', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), printController.resumeBatch);
-router.post('/print/batches/:id/reprint', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), printController.reprintBatch);
+router.post('/print/batches/:id/process', authenticateToken, requireRole('SUPERADMIN'), printController.processChunk);
+router.post('/print/batches/:id/pause', authenticateToken, requireRole('SUPERADMIN'), printController.pauseBatch);
+router.post('/print/batches/:id/resume', authenticateToken, requireRole('SUPERADMIN'), printController.resumeBatch);
+router.post('/print/batches/:id/reprint', authenticateToken, requireRole('SUPERADMIN'), printController.reprintBatch);
 router.post('/print/batches/:id/cancel', authenticateToken, requireRole('SUPERADMIN'), printController.cancelBatch);
 router.get('/print/batches/:id/tspl', authenticateToken, printController.downloadTspl);
-router.post('/print/test', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), printController.printTest);
-router.post('/print/test-barcode', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), printController.printTestBarcode);
+router.post('/print/test', authenticateToken, requireRole('SUPERADMIN'), printController.printTest);
+router.post('/print/test-barcode', authenticateToken, requireRole('SUPERADMIN'), printController.printTestBarcode);
 router.get('/print/printers', authenticateToken, printController.getPrinters);
 router.get('/print/diagnostics', authenticateToken, printController.getDiagnostics);
-router.post('/print/calibrate', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), printController.calibrate);
-router.post('/print/unpause', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), printController.unpause);
-router.post('/print/reconnect', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), printController.reconnect);
+router.post('/print/calibrate', authenticateToken, requireRole('SUPERADMIN'), printController.calibrate);
+router.post('/print/unpause', authenticateToken, requireRole('SUPERADMIN'), printController.unpause);
+router.post('/print/reconnect', authenticateToken, requireRole('SUPERADMIN'), printController.reconnect);
 router.get('/print/settings', authenticateToken, printController.getSettings);
-router.put('/print/settings', authenticateToken, requireRole(['SUPERADMIN', 'ADMIN']), printController.updateSettings);
+router.put('/print/settings', authenticateToken, requireRole('SUPERADMIN'), printController.updateSettings);
 
 // Print Gateway External Endpoints (Secured via X-Gateway-Key header)
 router.post('/print/gateway/heartbeat', printController.gatewayHeartbeat);

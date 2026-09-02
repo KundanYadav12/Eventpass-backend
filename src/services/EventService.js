@@ -65,7 +65,7 @@ async function getEventById(id) {
   };
 }
 
-async function createEvent({ eventName, eventCode, description, venue, startDate, endDate, status = 'active', userId, userName, ipAddress, userAgent }) {
+async function createEvent({ eventName, eventCode, description, venue, startDate, endDate, status = 'active', barcodeType = 'QR_CODE', stickerWidthMm = 38, stickerHeightMm = 50, userId, userName, ipAddress, userAgent }) {
   if (!eventName || !eventCode || !startDate || !endDate) {
     throw new Error('Event Name, Event Code, Start Date, and End Date are required');
   }
@@ -77,9 +77,9 @@ async function createEvent({ eventName, eventCode, description, venue, startDate
   }
 
   const result = await query(
-    `INSERT INTO events (event_name, event_code, description, venue, event_start_date, event_end_date, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-    [eventName.trim(), cleanCode, description || '', venue || '', startDate, endDate, status]
+    `INSERT INTO events (event_name, event_code, description, venue, event_start_date, event_end_date, status, barcode_type, sticker_width_mm, sticker_height_mm, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+    [eventName.trim(), cleanCode, description || '', venue || '', startDate, endDate, status, barcodeType || 'QR_CODE', stickerWidthMm || 38, stickerHeightMm || 50]
   );
 
   const eventId = result.insertId;
@@ -90,7 +90,7 @@ async function createEvent({ eventName, eventCode, description, venue, startDate
     action: 'CREATE_EVENT',
     entity: 'EVENT',
     entityId: eventId,
-    newValue: { eventName, eventCode: cleanCode, startDate, endDate, status },
+    newValue: { eventName, eventCode: cleanCode, startDate, endDate, status, barcodeType },
     ipAddress,
     userAgent
   });
@@ -98,7 +98,7 @@ async function createEvent({ eventName, eventCode, description, venue, startDate
   return getEventById(eventId);
 }
 
-async function updateEvent(id, { eventName, eventCode, description, venue, startDate, endDate, status, userId, userName, ipAddress, userAgent }) {
+async function updateEvent(id, { eventName, eventCode, description, venue, startDate, endDate, status, barcodeType, stickerWidthMm, stickerHeightMm, userId, userName, ipAddress, userAgent }) {
   const existing = await query('SELECT * FROM events WHERE id = ?', [id]);
   if (existing.length === 0) {
     throw new Error('Event not found');
@@ -123,9 +123,12 @@ async function updateEvent(id, { eventName, eventCode, description, venue, start
          event_start_date = COALESCE(?, event_start_date),
          event_end_date = COALESCE(?, event_end_date),
          status = COALESCE(?, status),
+         barcode_type = COALESCE(?, barcode_type),
+         sticker_width_mm = COALESCE(?, sticker_width_mm),
+         sticker_height_mm = COALESCE(?, sticker_height_mm),
          updated_at = NOW()
      WHERE id = ?`,
-    [eventName, cleanCode, description, venue, startDate, endDate, status, id]
+    [eventName, cleanCode, description, venue, startDate, endDate, status, barcodeType, stickerWidthMm, stickerHeightMm, id]
   );
 
   await logAudit({
@@ -135,7 +138,7 @@ async function updateEvent(id, { eventName, eventCode, description, venue, start
     entity: 'EVENT',
     entityId: id,
     oldValue: oldEvent,
-    newValue: { eventName, eventCode: cleanCode, description, venue, startDate, endDate, status },
+    newValue: { eventName, eventCode: cleanCode, description, venue, startDate, endDate, status, barcodeType, stickerWidthMm, stickerHeightMm },
     ipAddress,
     userAgent
   });

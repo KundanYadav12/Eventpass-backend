@@ -59,7 +59,7 @@ async function getPrintBatches({ eventId = null, status = 'all', page = 1, limit
  * Create a new print batch linked to an event and category
  * Auto-generates unique 7-character passes if existing inventory is exhausted
  */
-async function createPrintBatch({ eventId, categoryId, name, quantity, passType = null }, { userId, userName, ipAddress, userAgent } = {}) {
+async function createPrintBatch({ eventId, categoryId, name, quantity, passType = null, barcodePattern = 'QR_CODE' }, { userId, userName, ipAddress, userAgent } = {}) {
   const result = await withTransaction(async (conn) => {
     let targetEventId = eventId;
     let targetCatId = categoryId;
@@ -119,9 +119,9 @@ async function createPrintBatch({ eventId, categoryId, name, quantity, passType 
         const hmac = generateHmacSignature(newCode);
 
         const [insResult] = await conn.query(
-          `INSERT INTO passes (event_id, category_id, code, hmac_sig, code_type, status, printed, valid_from, valid_until, created_by, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, NOW(), NOW())`,
-          [evId, targetCatId, newCode, hmac, cat.code || 'PASS', validFrom, validUntil, userId]
+          `INSERT INTO passes (event_id, category_id, code, hmac_sig, code_type, category_prefix, status, printed, valid_from, valid_until, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, NOW(), NOW())`,
+          [evId, targetCatId, newCode, hmac, cat.code || 'PASS', cat.category_prefix || '', validFrom, validUntil]
         );
 
         passesToUse.push({
@@ -138,10 +138,12 @@ async function createPrintBatch({ eventId, categoryId, name, quantity, passType 
       throw new Error('No unprinted passes available to allocate for this print batch');
     }
 
+    const resolvedPassType = passesToUse[0]?.code_type || 'PASS';
+    const targetPattern = (barcodePattern || 'QR_CODE').toUpperCase();
     const [batchResult] = await conn.query(
-      `INSERT INTO print_batches (event_id, category_id, name, total_requested, printed_count, status, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 0, 'created', ?, NOW(), NOW())`,
-      [targetEventId, targetCatId, name || `Batch-${new Date().toISOString().slice(0, 10)}`, passesToUse.length, userId]
+      `INSERT INTO print_batches (event_id, category_id, name, pass_type, barcode_pattern, total_requested, printed_count, status, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 'created', ?, NOW(), NOW())`,
+      [targetEventId, targetCatId, name || `Batch-${new Date().toISOString().slice(0, 10)}`, resolvedPassType, targetPattern, passesToUse.length, userId]
     );
 
     const batchId = batchResult.insertId;
@@ -308,8 +310,8 @@ async function getBatchDetails(batchId) {
  * Process chunk printing (marks passes printed and sends commands directly or to Gateway Queue)
  */
 async function processBatchChunk(batchId, chunkSize = 50, printerName = null, { userId, userName, ipAddress, userAgent } = {}) {
-  const [batchRows] = await query('SELECT * FROM print_batches WHERE id = ?', [batchId]);
-  if (batchRows.length === 0) throw new Error('Batch not found');
+  const batchRows = await query('SELECT * FROM print_batches WHERE id = ?', [batchId]);
+  if (!batchRows || batchRows.length === 0) throw new Error('Batch not found');
   const batch = batchRows[0];
 
   // 1. Get dynamic settings
@@ -366,6 +368,9 @@ async function processBatchChunk(batchId, chunkSize = 50, printerName = null, { 
 
     // 3. Generate Pluggable Command Payload (TSPL / ZPL)
     const payload = generator.generateBatch(formattedPasses, {
+      pattern: curBatch.barcode_pattern || settings.barcode_type || 'QR_CODE',
+      widthMm: settings.stock_width_mm || 38,
+      heightMm: settings.stock_height_mm || 50,
       gapMm: settings.gap_mm,
       speed: settings.speed,
       density: settings.density,
@@ -447,15 +452,19 @@ async function processBatchChunk(batchId, chunkSize = 50, printerName = null, { 
 }
 
 /**
- * Print Exactly ONE Physical Barcode Test Label (50mm x 50mm)
+ * Print Exactly ONE Physical Barcode/QR Test Label (38mm x 50mm)
  * Uses active printer settings and selected command language
  */
-async function printSingleBarcodeTest(printerName = null, barcodeValue = '55KDBD2', { eventName = 'EVENTGEN 2026', category = 'VIP PASS' } = {}) {
+async function printSingleBarcodeTest(printerName = null, barcodeValue = '55KDBD2', { eventName = 'EVENTGEN 2026', category = 'VIP PASS', pattern = null } = {}) {
   const settings = await getSettings();
   const activePrinter = printerName || settings.printer_name || DEFAULT_PRINTER_NAME;
   const generator = getCommandGenerator(settings.command_language);
+  const targetPattern = pattern || settings.barcode_type || 'QR_CODE';
 
   const payload = generator.generateSingleBarcode(barcodeValue, eventName, category, {
+    pattern: targetPattern,
+    widthMm: settings.stock_width_mm || 38,
+    heightMm: settings.stock_height_mm || 50,
     gapMm: settings.gap_mm,
     speed: settings.speed,
     density: settings.density,
@@ -463,7 +472,7 @@ async function printSingleBarcodeTest(printerName = null, barcodeValue = '55KDBD
   });
 
   console.log(`\n======================================================`);
-  console.log(`[RAW ${settings.command_language} STREAM - SINGLE BARCODE] Sending to '${activePrinter}':`);
+  console.log(`[RAW ${settings.command_language} STREAM - SINGLE TEST] Sending to '${activePrinter}':`);
   console.log(payload);
   console.log(`======================================================\n`);
 
@@ -479,11 +488,11 @@ async function printSingleBarcodeTest(printerName = null, barcodeValue = '55KDBD
     return {
       success: true,
       gatewayMode: true,
-      message: `Physical Code 128 Barcode test label queued for Local Gateway on '${activePrinter}' (Job #${queueRes.jobId}).`,
+      message: `Physical test label (${targetPattern}) queued for Local Gateway on '${activePrinter}' (Job #${queueRes.jobId}).`,
       printerName: activePrinter,
-      barcodeType: 'Code 128',
+      barcodeType: targetPattern,
       barcodeValue,
-      labelSize: '50mm x 50mm',
+      labelSize: `${settings.stock_width_mm || 38}mm x ${settings.stock_height_mm || 50}mm`,
       tsplSent: payload
     };
   }
@@ -491,11 +500,11 @@ async function printSingleBarcodeTest(printerName = null, barcodeValue = '55KDBD
   const printResult = await printRawTspl(activePrinter, payload, 'TSC_Single_Barcode_Test');
   return {
     success: true,
-    message: `Physical Code 128 Barcode test label spooled to Windows printer '${activePrinter}'`,
+    message: `Physical test label (${targetPattern}) spooled to Windows printer '${activePrinter}'`,
     printerName: activePrinter,
-    barcodeType: 'Code 128',
+    barcodeType: targetPattern,
     barcodeValue,
-    labelSize: '50mm x 50mm',
+    labelSize: `${settings.stock_width_mm || 38}mm x ${settings.stock_height_mm || 50}mm`,
     bytesSent: printResult.bytesSent,
     tsplSent: payload,
     diagnostics: printResult.diagnostics
@@ -505,12 +514,15 @@ async function printSingleBarcodeTest(printerName = null, barcodeValue = '55KDBD
 /**
  * Print Dummy / Sample Test Label
  */
-async function printTestLabel(printerName = null) {
+async function printTestLabel(printerName = null, { pattern = null } = {}) {
   const settings = await getSettings();
   const activePrinter = printerName || settings.printer_name || DEFAULT_PRINTER_NAME;
   const generator = getCommandGenerator(settings.command_language);
 
-  const dummyPayload = generator.generateSingleBarcode('TEST244', 'TSC TEST', '50MM SAMPLE', {
+  const dummyPayload = generator.generateSingleBarcode('TEST244', 'TSC TEST', '38MM SAMPLE', {
+    pattern: pattern || settings.barcode_type || 'QR_CODE',
+    widthMm: settings.stock_width_mm || 38,
+    heightMm: settings.stock_height_mm || 50,
     gapMm: settings.gap_mm,
     speed: settings.speed,
     density: settings.density
@@ -677,6 +689,9 @@ async function getBatchTsplFile(batchId) {
   const settings = await getSettings();
   const generator = getCommandGenerator(settings.command_language);
 
+  const batchRows = await query('SELECT * FROM print_batches WHERE id = ?', [batchId]);
+  const batch = batchRows && batchRows.length > 0 ? batchRows[0] : {};
+
   const passes = await query(
     `SELECT p.code, p.code_type, p.valid_from, p.valid_until,
             c.name as category_name, e.event_name
@@ -696,6 +711,9 @@ async function getBatchTsplFile(batchId) {
   }));
 
   return generator.generateBatch(formattedPasses, {
+    pattern: batch.barcode_pattern || settings.barcode_type || 'QR_CODE',
+    widthMm: settings.stock_width_mm || 38,
+    heightMm: settings.stock_height_mm || 50,
     gapMm: settings.gap_mm,
     speed: settings.speed,
     density: settings.density,

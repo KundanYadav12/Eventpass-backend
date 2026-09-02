@@ -20,7 +20,7 @@ async function getBatches(req, res, next) {
 
 async function createBatch(req, res, next) {
   try {
-    const { eventId, categoryId, name, quantity } = req.body;
+    const { eventId, categoryId, name, quantity, barcodePattern = 'QR_CODE' } = req.body;
     const targetEventId = req.effectiveEventId || eventId;
     const ipAddress = req.ip || req.connection.remoteAddress;
     const userAgent = req.headers['user-agent'];
@@ -34,6 +34,7 @@ async function createBatch(req, res, next) {
       categoryId,
       name,
       quantity,
+      barcodePattern,
       userId: req.user?.id,
       userName: req.user?.name,
       ipAddress,
@@ -173,8 +174,8 @@ async function downloadTspl(req, res, next) {
 
 async function printTest(req, res, next) {
   try {
-    const { printerName = 'TSC TE244' } = req.body;
-    const result = await printService.printTestLabel(printerName);
+    const { printerName = 'TSC TE244', pattern = null } = req.body;
+    const result = await printService.printTestLabel(printerName, { pattern });
     res.json(result);
   } catch (error) {
     next(error);
@@ -183,8 +184,8 @@ async function printTest(req, res, next) {
 
 async function printTestBarcode(req, res, next) {
   try {
-    const { printerName = 'TSC TE244', barcodeValue = '55KDBD2' } = req.body;
-    const result = await printService.printSingleBarcodeTest(printerName, barcodeValue);
+    const { printerName = 'TSC TE244', barcodeValue = '55KDBD2', pattern = 'QR_CODE' } = req.body;
+    const result = await printService.printSingleBarcodeTest(printerName, barcodeValue, { pattern });
     res.json(result);
   } catch (error) {
     next(error);

@@ -217,8 +217,8 @@ async function generatePasses({ eventId, categoryId, quantity, userId, userName,
     throw new Error('Valid Event ID, Category ID, and Quantity are required');
   }
 
-  const [categoryRows] = await query('SELECT * FROM pass_categories WHERE id = ? AND event_id = ?', [targetCatId, targetEventId]);
-  if (categoryRows.length === 0) {
+  const categoryRows = await query('SELECT * FROM pass_categories WHERE id = ? AND event_id = ?', [targetCatId, targetEventId]);
+  if (!categoryRows || categoryRows.length === 0) {
     throw new Error('Category not found for the specified event');
   }
 

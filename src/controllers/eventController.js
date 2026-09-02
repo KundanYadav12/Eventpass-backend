@@ -30,7 +30,7 @@ async function getEventById(req, res, next) {
 
 async function createEvent(req, res, next) {
   try {
-    const { eventName, eventCode, description, venue, startDate, endDate, status } = req.body;
+    const { eventName, eventCode, description, venue, startDate, endDate, status, barcodeType, stickerWidthMm, stickerHeightMm } = req.body;
     const ipAddress = req.ip || req.connection.remoteAddress;
     const userAgent = req.headers['user-agent'];
 
@@ -42,6 +42,9 @@ async function createEvent(req, res, next) {
       startDate,
       endDate,
       status,
+      barcodeType,
+      stickerWidthMm,
+      stickerHeightMm,
       userId: req.user?.id,
       userName: req.user?.name,
       ipAddress,
@@ -61,7 +64,7 @@ async function createEvent(req, res, next) {
 async function updateEvent(req, res, next) {
   try {
     const { id } = req.params;
-    const { eventName, eventCode, description, venue, startDate, endDate, status } = req.body;
+    const { eventName, eventCode, description, venue, startDate, endDate, status, barcodeType, stickerWidthMm, stickerHeightMm } = req.body;
     const ipAddress = req.ip || req.connection.remoteAddress;
     const userAgent = req.headers['user-agent'];
 
@@ -73,6 +76,9 @@ async function updateEvent(req, res, next) {
       startDate,
       endDate,
       status,
+      barcodeType,
+      stickerWidthMm,
+      stickerHeightMm,
       userId: req.user?.id,
       userName: req.user?.name,
       ipAddress,

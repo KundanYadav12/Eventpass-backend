@@ -1,12 +1,14 @@
 /**
  * TSPL2 Command Language Generator for TSC TE244 and compatible thermal printers
  * 
- * Supports:
- * - 50mm x 50mm stock (Single & 2-Up Dual Column across 104mm width)
- * - Code 128 Barcodes (BARCODE) & 2D QR Codes (QRCODE)
- * - Pure ASCII Sanitization
- * - CRLF Line Endings
- * - Media Gap Calibration & Hardware Unpause
+ * Specifications:
+ * - Sticker Size: Configurable, Default 38mm width × 50mm height (304 × 400 dots @ 203 DPI)
+ * - 2-Up Dual Column Stock: ~80mm width across roll (2x 38mm labels + 4mm gap)
+ * - Supported Barcode Patterns:
+ *    - 'QR_CODE' / 'QR' (2D QRCODE with pass code text beneath)
+ *    - 'CODE128' (1D Barcode with pass code text beneath)
+ *    - 'CODE39' (1D Barcode with pass code text beneath)
+ * - Pure ASCII Sanitization & strictly CRLF (\r\n) line endings
  */
 
 function sanitizeAscii(str) {
@@ -15,28 +17,68 @@ function sanitizeAscii(str) {
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2022\u2023\u25E6\u2043\u2219]/g, '-')
-    .replace(/[^\x20-\x7E]/g, '');
+    .replace(/[^\x20-\x7E]/g, '')
+    .trim();
 }
 
 /**
- * Generate TSPL for a Single 50mm x 50mm Pass (Dual or Single Column)
+ * Generate TSPL for a single label element at offset xOffset
+ */
+function buildLabelCommands(pass, xOffset = 0, options = {}) {
+  const {
+    pattern = 'QR_CODE',
+    widthMm = 38,
+    heightMm = 50
+  } = options;
+
+  const code = sanitizeAscii(pass.code || 'PASS001').toUpperCase();
+  const qrData = sanitizeAscii(pass.qr_data || pass.signed_code || code);
+
+  // Width in dots: 38mm = ~304 dots. Height in dots: 50mm = ~400 dots
+  const labelWidthDots = Math.round(widthMm * 8);
+  const labelHeightDots = Math.round(heightMm * 8);
+  const boxRight = xOffset + labelWidthDots - 10;
+  const boxBottom = labelHeightDots - 10;
+
+  const lines = [];
+  const upperPattern = String(pattern || pass.barcode_pattern || 'QR_CODE').toUpperCase();
+
+  if (upperPattern === 'CODE128' || upperPattern === '128') {
+    // 1D Code 128 Barcode (x=16, y=100, height=130 dots)
+    lines.push(`BARCODE ${xOffset + 16},100,"128",130,0,0,2,4,"${code}"`);
+    lines.push(`TEXT ${xOffset + 16},265,"3",0,1,1,"PASS CODE: ${code}"`);
+  } else if (upperPattern === 'CODE39' || upperPattern === '39') {
+    // 1D Code 39 Barcode (x=16, y=100, height=130 dots)
+    lines.push(`BARCODE ${xOffset + 16},100,"39",130,0,0,2,4,"${code}"`);
+    lines.push(`TEXT ${xOffset + 16},265,"3",0,1,1,"PASS CODE: ${code}"`);
+  } else {
+    // Default: 2D QR Code centered with pass code text beneath
+    // QR Code (x=55, y=60, ECC=L, cell_width=6, mode=A, rotation=0)
+    lines.push(`QRCODE ${xOffset + 55},60,L,6,A,0,"${qrData}"`);
+    lines.push(`TEXT ${xOffset + 16},275,"3",0,1,1,"PASS CODE: ${code}"`);
+  }
+
+  // Outer Decorative Border
+  lines.push(`BOX ${xOffset + 8},8,${boxRight},${boxBottom},2`);
+
+  return lines;
+}
+
+/**
+ * Generate TSPL for a Single 38mm x 50mm Pass
  */
 function generateSinglePass(pass, options = {}) {
   const {
+    widthMm = 38,
+    heightMm = 50,
     gapMm = 3,
     speed = 4,
     density = 8,
     direction = 1
   } = options;
 
-  const code = sanitizeAscii(pass.code || 'PASS001');
-  const eventName = sanitizeAscii(pass.event_name || 'EVENTGEN 2026').substring(0, 20);
-  const categoryName = sanitizeAscii(pass.category_name || 'VIP').substring(0, 16);
-  const dateLabel = sanitizeAscii(pass.valid_date_label || 'VALID 2026').substring(0, 16);
-  const qrData = sanitizeAscii(pass.qr_data || pass.signed_code || code);
-
   const lines = [
-    'SIZE 50 mm, 50 mm',
+    `SIZE ${widthMm} mm, ${heightMm} mm`,
     `GAP ${gapMm} mm, 0 mm`,
     `SPEED ${speed}`,
     `DENSITY ${density}`,
@@ -44,14 +86,7 @@ function generateSinglePass(pass, options = {}) {
     'REFERENCE 0,0',
     'SET TEAR ON',
     'CLS',
-    `TEXT 20,20,"2",0,1,1,"${eventName}"`,
-    `TEXT 20,48,"3",0,1,1,"${categoryName}"`,
-    `QRCODE 25,85,L,5,A,0,"${qrData}"`,
-    'TEXT 180,105,"2",0,1,1,"PASS CODE:"',
-    `TEXT 180,135,"4",0,1,1,"${code}"`,
-    `TEXT 20,295,"2",0,1,1,"${dateLabel}"`,
-    'TEXT 20,330,"1",0,1,1,"DO NOT DUPLICATE - SCANNABLE"',
-    'BOX 10,10,390,390,2',
+    ...buildLabelCommands(pass, 0, options),
     'PRINT 1,1'
   ];
 
@@ -59,18 +94,24 @@ function generateSinglePass(pass, options = {}) {
 }
 
 /**
- * Generate TSPL for 2 Passes Across (2-Up 50mm x 50mm on 104mm roll)
+ * Generate TSPL for 2 Passes Across (2-Up 38mm x 50mm on ~80mm roll)
  */
 function generateDualColumnPasses(pass1, pass2, options = {}) {
   const {
+    widthMm = 38,
+    heightMm = 50,
     gapMm = 3,
+    columnGapMm = 4,
     speed = 4,
     density = 8,
     direction = 1
   } = options;
 
+  const totalWidthMm = (widthMm * 2) + columnGapMm; // 38 + 38 + 4 = 80mm
+  const rightColumnOffsetDots = Math.round((widthMm + columnGapMm) * 8); // (38 + 4) * 8 = 336 dots
+
   const lines = [
-    'SIZE 104 mm, 50 mm',
+    `SIZE ${totalWidthMm} mm, ${heightMm} mm`,
     `GAP ${gapMm} mm, 0 mm`,
     `SPEED ${speed}`,
     `DENSITY ${density}`,
@@ -80,27 +121,11 @@ function generateDualColumnPasses(pass1, pass2, options = {}) {
     'CLS'
   ];
 
-  const addLabelToStream = (pass, xOffset) => {
-    if (!pass) return;
-    const code = sanitizeAscii(pass.code || 'PASS001');
-    const eventName = sanitizeAscii(pass.event_name || 'EVENTGEN 2026').substring(0, 20);
-    const categoryName = sanitizeAscii(pass.category_name || 'VIP').substring(0, 16);
-    const dateLabel = sanitizeAscii(pass.valid_date_label || 'VALID 2026').substring(0, 16);
-    const qrData = sanitizeAscii(pass.qr_data || pass.signed_code || code);
-
-    lines.push(`TEXT ${xOffset + 20},20,"2",0,1,1,"${eventName}"`);
-    lines.push(`TEXT ${xOffset + 20},48,"3",0,1,1,"${categoryName}"`);
-    lines.push(`QRCODE ${xOffset + 25},85,L,5,A,0,"${qrData}"`);
-    lines.push(`TEXT ${xOffset + 180},105,"2",0,1,1,"PASS CODE:"`);
-    lines.push(`TEXT ${xOffset + 180},135,"4",0,1,1,"${code}"`);
-    lines.push(`TEXT ${xOffset + 20},295,"2",0,1,1,"${dateLabel}"`);
-    lines.push(`TEXT ${xOffset + 20},330,"1",0,1,1,"DO NOT DUPLICATE - SCANNABLE"`);
-    lines.push(`BOX ${xOffset + 10},10,${xOffset + 390},390,2`);
-  };
-
-  addLabelToStream(pass1, 0);
+  if (pass1) {
+    lines.push(...buildLabelCommands(pass1, 0, options));
+  }
   if (pass2) {
-    addLabelToStream(pass2, 420); // 420 dots offset ~ 52.5mm
+    lines.push(...buildLabelCommands(pass2, rightColumnOffsetDots, options));
   }
 
   lines.push('PRINT 1,1');
@@ -126,39 +151,19 @@ function generateBatch(passes = [], options = {}) {
 }
 
 /**
- * Generate Dedicated Single Physical Code 128 Barcode Test Label
+ * Generate Dedicated Single Physical Barcode/QR Test Label (38mm x 50mm)
  */
 function generateSingleBarcode(barcodeValue = '55KDBD2', eventName = 'EVENTGEN 2026', category = 'VIP PASS', options = {}) {
-  const {
-    gapMm = 3,
-    speed = 4,
-    density = 8,
-    direction = 1
-  } = options;
+  const dummyPass = {
+    code: barcodeValue,
+    event_name: eventName,
+    category_name: category,
+    valid_date_label: 'VALID: 2026',
+    qr_data: barcodeValue,
+    barcode_pattern: options.pattern || 'QR_CODE'
+  };
 
-  const val = sanitizeAscii(barcodeValue);
-  const ev = sanitizeAscii(eventName).substring(0, 20);
-  const cat = sanitizeAscii(category).substring(0, 16);
-
-  const lines = [
-    'SIZE 50 mm, 50 mm',
-    `GAP ${gapMm} mm, 0 mm`,
-    `SPEED ${speed}`,
-    `DENSITY ${density}`,
-    `DIRECTION ${direction}`,
-    'REFERENCE 0,0',
-    'SET TEAR ON',
-    'CLS',
-    `TEXT 35,30,"3",0,1,1,"${ev}"`,
-    `TEXT 35,60,"2",0,1,1,"${cat}"`,
-    `BARCODE 35,95,"128",85,2,0,2,4,"${val}"`,
-    `TEXT 35,215,"2",0,1,1,"PASS CODE: ${val}"`,
-    'TEXT 35,250,"1",0,1,1,"SCAN AT GATE - DO NOT DUPLICATE"',
-    'BOX 15,15,385,385,2',
-    'PRINT 1,1'
-  ];
-
-  return lines.join('\r\n') + '\r\n';
+  return generateSinglePass(dummyPass, options);
 }
 
 /**
