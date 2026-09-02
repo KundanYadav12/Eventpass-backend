@@ -211,16 +211,35 @@ async function seed() {
       valid_until: '2026-10-12 23:59:59',
       total_quantity: 500,
       max_daily_scans: 1,
+      scan_behavior: 'RENEWABLE',
+      renewal_time: '01:00',
       price: 250.00
     }
   ];
 
   for (const cat of categories) {
+    const scanBehavior = cat.scan_behavior || (cat.code === 'all_season' ? 'RENEWABLE' : 'ONE_TIME');
+    const renewalTime = cat.renewal_time || '01:00';
+    const renActiveFrom = scanBehavior === 'RENEWABLE' ? (cat.renewal_active_from || cat.valid_from) : null;
+    const renActiveUntil = scanBehavior === 'RENEWABLE' ? (cat.renewal_active_until || cat.valid_until) : null;
+
     await pool.query(
-      `INSERT INTO pass_categories (id, event_id, code, category_prefix, name, description, valid_from, valid_until, total_quantity, max_daily_scans, price, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-       ON DUPLICATE KEY UPDATE event_id = VALUES(event_id), code = VALUES(code), category_prefix = VALUES(category_prefix), name = VALUES(name), description = VALUES(description), valid_from = VALUES(valid_from), valid_until = VALUES(valid_until), total_quantity = VALUES(total_quantity)`,
-      [cat.id, cat.eventId, cat.code, cat.prefix, cat.name, cat.description, cat.valid_from, cat.valid_until, cat.total_quantity, cat.max_daily_scans, cat.price]
+      `INSERT INTO pass_categories (id, event_id, code, category_prefix, name, description, valid_from, valid_until, total_quantity, max_daily_scans, scan_behavior, renewal_time, renewal_active_from, renewal_active_until, price, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE
+         event_id = VALUES(event_id),
+         code = VALUES(code),
+         category_prefix = VALUES(category_prefix),
+         name = VALUES(name),
+         description = VALUES(description),
+         valid_from = VALUES(valid_from),
+         valid_until = VALUES(valid_until),
+         total_quantity = VALUES(total_quantity),
+         scan_behavior = VALUES(scan_behavior),
+         renewal_time = VALUES(renewal_time),
+         renewal_active_from = VALUES(renewal_active_from),
+         renewal_active_until = VALUES(renewal_active_until)`,
+      [cat.id, cat.eventId, cat.code, cat.prefix, cat.name, cat.description, cat.valid_from, cat.valid_until, cat.total_quantity, cat.max_daily_scans, scanBehavior, renewalTime, renActiveFrom, renActiveUntil, cat.price]
     );
   }
 
@@ -228,8 +247,8 @@ async function seed() {
 
   const defaultMessages = [
     { key: 'ENTRY_APPROVED', text: 'Entry Approved', desc: 'Shown when a pass is valid and successfully verified' },
-    { key: 'PASS_ALREADY_USED', text: 'Pass Already Used', desc: 'Shown when a single-use daily pass is scanned again' },
-    { key: 'PASS_ALREADY_USED_TODAY', text: 'Pass Already Used Today. Unlocks tomorrow at 1:00 AM.', desc: 'Shown when an all-season pass is scanned more than once on the same calendar day' },
+    { key: 'PASS_ALREADY_USED', text: 'Pass Already Used — This pass is permanently expired and cannot be used again.', desc: 'Shown when a one-time pass is scanned again' },
+    { key: 'PASS_ALREADY_USED_TODAY', text: 'Pass Already Used Today. Unlocks at scheduled renewal window.', desc: 'Shown when a renewable pass is scanned more than once in the same renewal cycle' },
     { key: 'PASS_EXPIRED', text: 'This pass has expired. Entry denied.', desc: 'Shown when a pass is scanned after its valid_until date/time' },
     { key: 'WRONG_DATE', text: 'This pass is not valid for today. Please return on valid date.', desc: 'Shown when a pass is scanned prior to its valid_from date/time' },
     { key: 'PASS_VOIDED', text: 'This pass is voided and invalid. Entry denied.', desc: 'Shown when a voided pass is presented at the gate' },

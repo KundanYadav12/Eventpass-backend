@@ -1,11 +1,21 @@
 const { getPool, withTransaction } = require('../config/db');
 const { acquireLock } = require('../config/redis');
 const { verifyHmacSignature } = require('../utils/cryptoUtil');
-const { getScanCycleKey, checkValidityWindow } = require('../utils/timeUtil');
+const {
+  checkValidityWindow,
+  calculateRenewalCycle,
+  hasScannedInCurrentCycle,
+  formatDateTimeIST,
+  formatDateIST,
+  formatTimeIST,
+  formatMySqlDateTime
+} = require('../utils/timeUtil');
 const { getMessage } = require('./MessageService');
 
 /**
  * Scan verification service with automatic event & category resolution, atomic locking, and robust debouncing
+ * Standardized on Indian Standard Time (IST, UTC+5:30)
+ * 
  * @param {Object} params
  * @param {string} params.code - 7-character barcode/QR pass code (e.g. "55KDBD2")
  * @param {string} params.deviceId - Scanner Device / Gate ID (e.g. "GATE-01")
@@ -15,6 +25,7 @@ const { getMessage } = require('./MessageService');
  */
 async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null, ipAddress = null, customNow = null }) {
   const scanTime = customNow ? new Date(customNow) : new Date();
+  const sqlScanTime = formatMySqlDateTime(scanTime);
   const cleanCode = (code || '').trim().toUpperCase();
 
   if (!cleanCode) {
@@ -46,7 +57,8 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
       const [passes] = await conn.query(
         `SELECT p.*,
                 e.id as resolved_event_id, e.event_name, e.event_code, e.status as event_status,
-                c.id as resolved_category_id, c.name as category_name, c.code as category_code, c.max_daily_scans
+                c.id as resolved_category_id, c.name as category_name, c.code as category_code, c.max_daily_scans,
+                c.scan_behavior, c.renewal_time, c.renewal_active_from, c.renewal_active_until
          FROM passes p
          LEFT JOIN events e ON p.event_id = e.id
          LEFT JOIN pass_categories c ON (p.category_id = c.id OR (p.code_type = c.code AND p.event_id = c.event_id))
@@ -59,8 +71,8 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
         // Record invalid scan attempt
         await conn.query(
           `INSERT INTO scan_history (pass_code, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, NOW(), 'invalid', 'Pass code not found in database', ?)`,
-          [cleanCode, deviceId, operatorId, ipAddress]
+           VALUES (?, ?, ?, ?, 'invalid', 'Pass code not found in database', ?)`,
+          [cleanCode, deviceId, operatorId, sqlScanTime, ipAddress]
         );
 
         return {
@@ -79,8 +91,8 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
         const msg = `Event '${pass.event_name}' is not currently active.`;
         await conn.query(
           `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'invalid', ?, ?)`,
-          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, msg, ipAddress]
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'invalid', ?, ?)`,
+          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
         );
 
         return {
@@ -98,8 +110,8 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
       if (!isHmacValid) {
         await conn.query(
           `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'invalid', 'HMAC signature verification failed - Possible counterfeit', ?)`,
-          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, ipAddress]
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'invalid', 'HMAC signature verification failed - Possible counterfeit', ?)`,
+          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, ipAddress]
         );
 
         return {
@@ -114,8 +126,8 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
         const msg = await getMessage('PASS_VOIDED', 'This pass is voided and invalid. Entry denied.');
         await conn.query(
           `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'voided', ?, ?)`,
-          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, msg, ipAddress]
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'voided', ?, ?)`,
+          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
         );
 
         return {
@@ -128,18 +140,18 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
         };
       }
 
-      // 5. Date & Validity Window Check
+      // 5. Date & Validity Window Check in IST
       const validityStatus = checkValidityWindow(scanTime, pass.valid_from, pass.valid_until);
 
       if (validityStatus === 'future') {
-        const fromDateFormatted = new Date(pass.valid_from).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+        const fromDateFormatted = formatDateIST(pass.valid_from);
         const defaultMsg = `This pass is valid on ${fromDateFormatted}. Please return on that date.`;
         const msg = (await getMessage('WRONG_DATE', defaultMsg)).replace('{date}', fromDateFormatted);
 
         await conn.query(
           `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'wrong_date', ?, ?)`,
-          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, msg, ipAddress]
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'wrong_date', ?, ?)`,
+          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
         );
 
         return {
@@ -153,7 +165,7 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
       }
 
       if (validityStatus === 'expired' || pass.status === 'expired') {
-        const untilDateFormatted = new Date(pass.valid_until).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+        const untilDateFormatted = formatDateIST(pass.valid_until);
         const defaultMsg = `This pass expired on ${untilDateFormatted}. Entry denied.`;
         const msg = (await getMessage('PASS_EXPIRED', defaultMsg)).replace('{date}', untilDateFormatted);
 
@@ -163,8 +175,8 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
 
         await conn.query(
           `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'expired', ?, ?)`,
-          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, msg, ipAddress]
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expired', ?, ?)`,
+          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
         );
 
         return {
@@ -177,22 +189,23 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
         };
       }
 
-      // 6. Category Rules (Daily Single-Use vs Multi-Day Season)
-      const isDailyPass = pass.code_type?.startsWith('daily') || pass.max_daily_scans === 1 && pass.valid_from === pass.valid_until;
+      // 6. Branch based on Configurable Scan Behavior (Mode A vs Mode B)
+      const scanBehavior = (pass.scan_behavior || 'ONE_TIME').toUpperCase();
 
-      if (isDailyPass && pass.code_type !== 'all_season') {
-        if (pass.status === 'used' || pass.scan_count > 0) {
+      // =========================================================================
+      // MODE A — One-Time Use (Permanent Expiry)
+      // =========================================================================
+      if (scanBehavior === 'ONE_TIME') {
+        if (pass.status === 'used' || (pass.scan_count && pass.scan_count >= 1) || pass.first_scanned_at) {
           const originalScanDate = pass.first_scanned_at || pass.last_scanned_at;
-          const timeFormatted = originalScanDate
-            ? new Date(originalScanDate).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
-            : 'earlier';
-          const reason = `Pass already used at ${timeFormatted}`;
-          const msg = await getMessage('PASS_ALREADY_USED', 'Pass Already Used');
+          const timeFormatted = originalScanDate ? formatDateTimeIST(originalScanDate) : 'earlier';
+          const reason = `Pass already used at ${timeFormatted}. This pass is permanently expired and cannot be used again.`;
+          const msg = 'Pass Already Used — This pass is permanently expired and cannot be used again.';
 
           await conn.query(
             `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-             VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'already_used', ?, ?)`,
-            [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, reason, ipAddress]
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'already_used', ?, ?)`,
+            [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, reason, ipAddress]
           );
 
           return {
@@ -208,23 +221,23 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
           };
         }
 
-        // Approve Daily Pass
+        // Approve One-Time Pass
         await conn.query(
           `UPDATE passes
            SET status = 'used',
                scan_count = scan_count + 1,
-               first_scanned_at = COALESCE(first_scanned_at, NOW()),
-               last_scanned_at = NOW(),
+               first_scanned_at = COALESCE(first_scanned_at, ?),
+               last_scanned_at = ?,
                updated_at = NOW()
            WHERE id = ?`,
-          [pass.id]
+          [sqlScanTime, sqlScanTime, pass.id]
         );
 
         const msg = await getMessage('ENTRY_APPROVED', 'Entry Approved');
         await conn.query(
           `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'approved', ?, ?)`,
-          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, 'Daily Pass Entry Approved', ipAddress]
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?)`,
+          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, 'One-Time Pass Entry Approved', ipAddress]
         );
 
         return {
@@ -237,37 +250,70 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
             ...formatPassPayload(pass),
             status: 'used',
             scanCount: (pass.scan_count || 0) + 1,
-            firstScannedAt: pass.first_scanned_at || new Date().toISOString(),
-            lastScannedAt: new Date().toISOString()
+            firstScannedAt: pass.first_scanned_at || scanTime.toISOString(),
+            lastScannedAt: scanTime.toISOString()
           }
         };
       }
 
-      // Multi-Day / All-Season Pass (Max 1 scan per calendar day, 1:00 AM server reset)
-      const currentCycleKey = getScanCycleKey(scanTime);
-      let alreadyScannedInCurrentCycle = false;
+      // =========================================================================
+      // MODE B — Renewable (Scheduled Daily / Recurring Reset in IST)
+      // =========================================================================
+      const activeFrom = pass.renewal_active_from || pass.valid_from;
+      const activeUntil = pass.renewal_active_until || pass.valid_until;
+      const renewalTimeStr = pass.renewal_time || '01:00';
 
-      if (pass.last_scanned_at && pass.scan_count > 0) {
-        const lastCycleKey = getScanCycleKey(pass.last_scanned_at);
-        if (currentCycleKey === lastCycleKey) {
-          alreadyScannedInCurrentCycle = true;
-        }
+      const cycle = calculateRenewalCycle(scanTime, renewalTimeStr, activeFrom, activeUntil);
+
+      if (cycle.status === 'expired') {
+        const msg = `This pass has expired. Renewal active window ended on ${cycle.activeUntilIST}.`;
+        await conn.query(
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expired', ?, ?)`,
+          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
+        );
+
+        return {
+          success: false,
+          result: 'expired',
+          message: msg,
+          event: formatEventPayload(pass),
+          category: formatCategoryPayload(pass),
+          pass: formatPassPayload(pass)
+        };
       }
 
+      if (cycle.status === 'future') {
+        const msg = `Pass renewal is not yet active. Renewal window starts on ${cycle.activeFromIST}.`;
+        await conn.query(
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'wrong_date', ?, ?)`,
+          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
+        );
+
+        return {
+          success: false,
+          result: 'wrong_date',
+          message: msg,
+          event: formatEventPayload(pass),
+          category: formatCategoryPayload(pass),
+          pass: formatPassPayload(pass)
+        };
+      }
+
+      // Check if already scanned within the active cycle
+      const alreadyScannedInCurrentCycle = hasScannedInCurrentCycle(pass.last_scanned_at, cycle.cycleStart);
+
       if (alreadyScannedInCurrentCycle) {
-        const lastScanTimeFormatted = new Date(pass.last_scanned_at).toLocaleString('en-GB', {
-          day: 'numeric',
-          month: 'short',
-          hour: '2-digit',
-          minute: '2-digit'
-        });
-        const reason = `Already scanned today at ${lastScanTimeFormatted}. Unlocks tomorrow at 1:00 AM.`;
-        const msg = await getMessage('PASS_ALREADY_USED_TODAY', 'Pass Already Used Today');
+        const lastScanTimeFormatted = formatDateTimeIST(pass.last_scanned_at);
+        const windowSuffix = cycle.activeWindowFormatted ? `, within ${cycle.activeWindowFormatted} window` : '';
+        const reason = `Already scanned today at ${lastScanTimeFormatted}. Unlocks at ${cycle.nextUnlockFormatted}${windowSuffix}.`;
+        const msg = `Pass Already Used Today. Unlocks at ${cycle.nextUnlockTimeFormatted}${windowSuffix}.`;
 
         await conn.query(
           `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'already_used', ?, ?)`,
-          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, reason, ipAddress]
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'already_used', ?, ?)`,
+          [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, reason, ipAddress]
         );
 
         return {
@@ -283,23 +329,23 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
         };
       }
 
-      // Approve Multi-Day Pass for today's shift
+      // Approve Renewable Pass for current shift/cycle
       const isFirstScan = !pass.first_scanned_at;
       await conn.query(
         `UPDATE passes
          SET scan_count = scan_count + 1,
-             first_scanned_at = COALESCE(first_scanned_at, NOW()),
-             last_scanned_at = NOW(),
+             first_scanned_at = COALESCE(first_scanned_at, ?),
+             last_scanned_at = ?,
              updated_at = NOW()
          WHERE id = ?`,
-        [pass.id]
+        [sqlScanTime, sqlScanTime, pass.id]
       );
 
       const approvedMsg = await getMessage('ENTRY_APPROVED', 'Entry Approved');
       await conn.query(
         `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'approved', ?, ?)`,
-        [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, 'Multi-Day Pass Entry Approved', ipAddress]
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?)`,
+        [eventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, `Renewable Pass Entry Approved (Cycle: ${formatTimeIST(renewalTimeStr)})`, ipAddress]
       );
 
       return {
@@ -311,8 +357,8 @@ async function processScan({ code, deviceId = 'GATE-DEFAULT', operatorId = null,
         pass: {
           ...formatPassPayload(pass),
           scanCount: (pass.scan_count || 0) + 1,
-          firstScannedAt: isFirstScan ? new Date().toISOString() : pass.first_scanned_at,
-          lastScannedAt: new Date().toISOString()
+          firstScannedAt: isFirstScan ? scanTime.toISOString() : pass.first_scanned_at,
+          lastScannedAt: scanTime.toISOString()
         }
       };
     });
@@ -335,7 +381,11 @@ function formatCategoryPayload(pass) {
   return {
     id: pass.resolved_category_id || pass.category_id,
     name: pass.category_name || pass.code_type,
-    code: pass.category_code || pass.code_type
+    code: pass.category_code || pass.code_type,
+    scanBehavior: pass.scan_behavior || 'ONE_TIME',
+    renewalTime: pass.renewal_time || '01:00',
+    renewalActiveFrom: pass.renewal_active_from,
+    renewalActiveUntil: pass.renewal_active_until
   };
 }
 

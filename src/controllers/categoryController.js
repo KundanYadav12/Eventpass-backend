@@ -40,7 +40,23 @@ async function getCategories(req, res, next) {
 
 async function createCategory(req, res, next) {
   try {
-    const { eventId, name, code, categoryPrefix, description, validFrom, validUntil, totalQuantity = 0, maxDailyScans = 1, price = 0 } = req.body;
+    const {
+      eventId,
+      name,
+      code,
+      categoryPrefix,
+      description,
+      validFrom,
+      validUntil,
+      totalQuantity = 0,
+      maxDailyScans = 1,
+      scanBehavior = 'ONE_TIME',
+      renewalTime = '01:00',
+      renewalActiveFrom = null,
+      renewalActiveUntil = null,
+      price = 0
+    } = req.body;
+
     const targetEventId = req.effectiveEventId || eventId;
     const ipAddress = req.ip || req.connection.remoteAddress;
     const userAgent = req.headers['user-agent'];
@@ -49,10 +65,24 @@ async function createCategory(req, res, next) {
       return res.status(400).json({ success: false, message: 'Event ID, Category Name, Code, and Validity dates are required' });
     }
 
+    const behavior = (scanBehavior || 'ONE_TIME').toUpperCase() === 'RENEWABLE' ? 'RENEWABLE' : 'ONE_TIME';
+    const renTime = renewalTime || '01:00';
+    const renActiveFrom = behavior === 'RENEWABLE' ? (renewalActiveFrom || validFrom) : null;
+    const renActiveUntil = behavior === 'RENEWABLE' ? (renewalActiveUntil || validUntil) : null;
+
     const result = await query(
-      `INSERT INTO pass_categories (event_id, code, category_prefix, name, description, valid_from, valid_until, total_quantity, max_daily_scans, price, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [targetEventId, code.trim().toLowerCase(), categoryPrefix || '', name.trim(), description || '', validFrom, validUntil, totalQuantity, maxDailyScans, price]
+      `INSERT INTO pass_categories (
+        event_id, code, category_prefix, name, description,
+        valid_from, valid_until, total_quantity, max_daily_scans,
+        scan_behavior, renewal_time, renewal_active_from, renewal_active_until,
+        price, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        targetEventId, code.trim().toLowerCase(), categoryPrefix || '', name.trim(), description || '',
+        validFrom, validUntil, totalQuantity, maxDailyScans,
+        behavior, renTime, renActiveFrom, renActiveUntil,
+        price
+      ]
     );
 
     await logAudit({
@@ -62,7 +92,7 @@ async function createCategory(req, res, next) {
       action: 'CREATE_CATEGORY',
       entity: 'PASS_CATEGORY',
       entityId: result.insertId,
-      newValue: { eventId: targetEventId, name, code, validFrom, validUntil },
+      newValue: { eventId: targetEventId, name, code, validFrom, validUntil, scanBehavior: behavior, renewalTime: renTime },
       ipAddress,
       userAgent
     });
@@ -70,7 +100,7 @@ async function createCategory(req, res, next) {
     res.status(201).json({
       success: true,
       message: 'Category created successfully',
-      data: { id: result.insertId, name, code, eventId: targetEventId }
+      data: { id: result.insertId, name, code, eventId: targetEventId, scanBehavior: behavior }
     });
   } catch (error) {
     next(error);
@@ -80,7 +110,20 @@ async function createCategory(req, res, next) {
 async function updateCategory(req, res, next) {
   try {
     const { id } = req.params;
-    const { name, categoryPrefix, description, validFrom, validUntil, maxDailyScans, price } = req.body;
+    const {
+      name,
+      categoryPrefix,
+      description,
+      validFrom,
+      validUntil,
+      maxDailyScans,
+      scanBehavior,
+      renewalTime,
+      renewalActiveFrom,
+      renewalActiveUntil,
+      price
+    } = req.body;
+
     const ipAddress = req.ip || req.connection.remoteAddress;
     const userAgent = req.headers['user-agent'];
 
@@ -90,6 +133,16 @@ async function updateCategory(req, res, next) {
     }
 
     const oldVal = existing[0];
+    const behavior = scanBehavior !== undefined
+      ? ((scanBehavior || 'ONE_TIME').toUpperCase() === 'RENEWABLE' ? 'RENEWABLE' : 'ONE_TIME')
+      : oldVal.scan_behavior;
+    const renTime = renewalTime !== undefined ? (renewalTime || '01:00') : oldVal.renewal_time;
+    const renActiveFrom = behavior === 'RENEWABLE'
+      ? (renewalActiveFrom !== undefined ? renewalActiveFrom : (oldVal.renewal_active_from || validFrom || oldVal.valid_from))
+      : null;
+    const renActiveUntil = behavior === 'RENEWABLE'
+      ? (renewalActiveUntil !== undefined ? renewalActiveUntil : (oldVal.renewal_active_until || validUntil || oldVal.valid_until))
+      : null;
 
     await query(
       `UPDATE pass_categories
@@ -99,10 +152,18 @@ async function updateCategory(req, res, next) {
            valid_from = COALESCE(?, valid_from),
            valid_until = COALESCE(?, valid_until),
            max_daily_scans = COALESCE(?, max_daily_scans),
+           scan_behavior = ?,
+           renewal_time = ?,
+           renewal_active_from = ?,
+           renewal_active_until = ?,
            price = COALESCE(?, price),
            updated_at = NOW()
        WHERE id = ?`,
-      [name, categoryPrefix, description, validFrom, validUntil, maxDailyScans, price, id]
+      [
+        name, categoryPrefix, description, validFrom, validUntil, maxDailyScans,
+        behavior, renTime, renActiveFrom, renActiveUntil,
+        price, id
+      ]
     );
 
     await logAudit({
@@ -113,7 +174,7 @@ async function updateCategory(req, res, next) {
       entity: 'PASS_CATEGORY',
       entityId: id,
       oldValue: oldVal,
-      newValue: { name, categoryPrefix, description, validFrom, validUntil, maxDailyScans, price },
+      newValue: { name, categoryPrefix, description, validFrom, validUntil, maxDailyScans, scanBehavior: behavior, renewalTime: renTime, price },
       ipAddress,
       userAgent
     });
