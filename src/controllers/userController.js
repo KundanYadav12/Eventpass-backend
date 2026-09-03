@@ -27,13 +27,40 @@ async function getUsers(req, res, next) {
     );
 
     for (const user of users) {
-      const perms = await query(
-        `SELECT p.code FROM permissions p
-         JOIN role_permissions rp ON p.id = rp.permission_id
-         WHERE rp.role_id = ?`,
-        [user.role_id]
-      );
-      user.permissions = perms.map(p => p.code);
+      if (user.role_id === 1) {
+        const allPerms = await query('SELECT code FROM permissions');
+        user.permissions = allPerms.map(p => p.code);
+      } else {
+        const targetEvId = user.event_id || (eventId ? parseInt(eventId, 10) : null);
+        if (targetEvId) {
+          const perms = await query(
+            `SELECT p.code FROM permissions p
+             JOIN admin_event_permissions aep ON p.id = aep.permission_id
+             WHERE aep.user_id = ? AND aep.event_id = ?`,
+            [user.id, targetEvId]
+          );
+          if (perms && perms.length > 0) {
+            user.permissions = perms.map(p => p.code);
+          } else {
+            // Fallback to role_permissions
+            const rolePerms = await query(
+              `SELECT p.code FROM permissions p
+               JOIN role_permissions rp ON p.id = rp.permission_id
+               WHERE rp.role_id = ?`,
+              [user.role_id]
+            );
+            user.permissions = rolePerms.map(p => p.code);
+          }
+        } else {
+          const rolePerms = await query(
+            `SELECT p.code FROM permissions p
+             JOIN role_permissions rp ON p.id = rp.permission_id
+             WHERE rp.role_id = ?`,
+            [user.role_id]
+          );
+          user.permissions = rolePerms.map(p => p.code);
+        }
+      }
     }
 
     res.json({
@@ -52,39 +79,68 @@ async function createUser(req, res, next) {
     const userAgent = req.headers['user-agent'];
 
     if (!name || !email || !password) {
-      return res.status(400).json({ success: false, message: 'Name, email, and password are required' });
+      return res.status(400).json({
+        success: false,
+        message: 'Name, email, and password are required'
+      });
     }
 
-    const existing = await query('SELECT id FROM users WHERE email = ?', [email.trim().toLowerCase()]);
+    // Check if email already exists
+    const existing = await query('SELECT id FROM users WHERE email = ?', [email.toLowerCase().trim()]);
     if (existing.length > 0) {
-      return res.status(400).json({ success: false, message: 'User with this email already exists' });
+      return res.status(409).json({
+        success: false,
+        message: 'User with this email already exists'
+      });
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
-    const assignedEventId = roleId === 1 ? null : (eventId ? parseInt(eventId, 10) : null);
+    // Role-based validation
+    if (roleId !== 1 && !eventId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Assigned event is required for Event Admin role'
+      });
+    }
 
-    const result = await query(
-      `INSERT INTO users (name, email, password_hash, role_id, event_id, is_active, created_at)
-       VALUES (?, ?, ?, ?, ?, 1, NOW())`,
-      [name.trim(), email.trim().toLowerCase(), passwordHash, roleId, assignedEventId]
-    );
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    let newUserId;
+    await withTransaction(async (conn) => {
+      const [userRes] = await conn.query(
+        `INSERT INTO users (name, email, password_hash, role_id, event_id, is_active, created_at)
+         VALUES (?, ?, ?, ?, ?, 1, NOW())`,
+        [name.trim(), email.toLowerCase().trim(), passwordHash, roleId, roleId === 1 ? null : parseInt(eventId, 10)]
+      );
+      newUserId = userRes.insertId;
+
+      // Seed initial event permissions for this admin if event assigned
+      if (roleId === 2 && eventId) {
+        const [defaultRolePerms] = await conn.query('SELECT permission_id FROM role_permissions WHERE role_id = 2');
+        for (const rp of defaultRolePerms) {
+          await conn.query(
+            'INSERT IGNORE INTO admin_event_permissions (user_id, event_id, permission_id) VALUES (?, ?, ?)',
+            [newUserId, parseInt(eventId, 10), rp.permission_id]
+          );
+        }
+      }
+    });
 
     await logAudit({
-      eventId: assignedEventId,
       userId: req.user?.id,
       userName: req.user?.name,
       action: 'CREATE_USER',
       entity: 'USER',
-      entityId: result.insertId,
-      newValue: { name, email, roleId, eventId: assignedEventId },
+      entityId: newUserId,
+      newValue: { name, email, roleId, eventId },
       ipAddress,
       userAgent
     });
 
     res.status(201).json({
       success: true,
-      message: 'Admin account created successfully',
-      data: { id: result.insertId, name, email, roleId, eventId: assignedEventId }
+      message: 'User created successfully',
+      data: { id: newUserId, name, email, roleId, eventId }
     });
   } catch (error) {
     next(error);
@@ -98,42 +154,66 @@ async function updateUser(req, res, next) {
     const ipAddress = req.ip || req.connection.remoteAddress;
     const userAgent = req.headers['user-agent'];
 
-    const existing = await query('SELECT * FROM users WHERE id = ?', [id]);
-    if (existing.length === 0) {
-      return res.status(404).json({ success: false, message: 'User not found' });
+    const existingUsers = await query('SELECT * FROM users WHERE id = ?', [id]);
+    if (existingUsers.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    const existing = existingUsers[0];
+
+    const updates = [];
+    const params = [];
+
+    if (name) { updates.push('name = ?'); params.push(name.trim()); }
+    if (email) {
+      const emailLower = email.toLowerCase().trim();
+      if (emailLower !== existing.email) {
+        const dupe = await query('SELECT id FROM users WHERE email = ? AND id != ?', [emailLower, id]);
+        if (dupe.length > 0) {
+          return res.status(409).json({ success: false, message: 'Email is already used by another account' });
+        }
+        updates.push('email = ?');
+        params.push(emailLower);
+      }
     }
 
-    const oldUser = existing[0];
-    let passwordHash = oldUser.password_hash;
-    if (password && password.length >= 8) {
-      passwordHash = await bcrypt.hash(password, 10);
+    if (password && password.trim().length >= 8) {
+      const salt = await bcrypt.genSalt(10);
+      const passwordHash = await bcrypt.hash(password, salt);
+      updates.push('password_hash = ?');
+      params.push(passwordHash);
     }
 
-    const activeFlag = isActive !== undefined ? (isActive ? 1 : 0) : oldUser.is_active;
-    const assignedEventId = roleId === 1 ? null : (eventId !== undefined ? eventId : oldUser.event_id);
+    if (roleId !== undefined) {
+      updates.push('role_id = ?');
+      params.push(parseInt(roleId, 10));
+    }
 
-    await query(
-      `UPDATE users
-       SET name = COALESCE(?, name),
-           email = COALESCE(?, email),
-           password_hash = ?,
-           role_id = COALESCE(?, role_id),
-           event_id = ?,
-           is_active = ?,
-           updated_at = NOW()
-       WHERE id = ?`,
-      [name, email ? email.trim().toLowerCase() : null, passwordHash, roleId, assignedEventId, activeFlag, id]
-    );
+    if (eventId !== undefined) {
+      updates.push('event_id = ?');
+      params.push(roleId === 1 || !eventId ? null : parseInt(eventId, 10));
+    }
+
+    if (isActive !== undefined) {
+      updates.push('is_active = ?');
+      params.push(isActive ? 1 : 0);
+    }
+
+    if (updates.length > 0) {
+      params.push(id);
+      await query(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, params);
+    }
 
     await logAudit({
-      eventId: assignedEventId,
       userId: req.user?.id,
       userName: req.user?.name,
       action: 'UPDATE_USER',
       entity: 'USER',
       entityId: id,
-      oldValue: { name: oldUser.name, email: oldUser.email, role_id: oldUser.role_id, event_id: oldUser.event_id, is_active: oldUser.is_active },
-      newValue: { name, email, roleId, eventId: assignedEventId, isActive: activeFlag },
+      oldValue: existing,
+      newValue: { name, email, roleId, eventId, isActive },
       ipAddress,
       userAgent
     });
@@ -198,10 +278,117 @@ async function updateRolePermissions(req, res, next) {
   }
 }
 
+/**
+ * Event-Scoped Permissions: GET /api/users/event-permissions?eventId=1&userId=2
+ */
+async function getEventPermissions(req, res, next) {
+  try {
+    const { eventId, userId } = req.query;
+    if (!eventId) {
+      return res.status(400).json({ success: false, message: 'Event ID is required' });
+    }
+
+    const targetEventId = parseInt(eventId, 10);
+    let targetUserId = userId ? parseInt(userId, 10) : null;
+
+    // If userId not given, fetch for the first active Event Admin or return all mapping
+    let querySql = `
+      SELECT aep.user_id, aep.event_id, aep.permission_id, p.code, p.name, p.module
+      FROM admin_event_permissions aep
+      JOIN permissions p ON aep.permission_id = p.id
+      WHERE aep.event_id = ?
+    `;
+    const params = [targetEventId];
+
+    if (targetUserId) {
+      querySql += ' AND aep.user_id = ?';
+      params.push(targetUserId);
+    }
+
+    const rows = await query(querySql, params);
+
+    res.json({
+      success: true,
+      eventId: targetEventId,
+      userId: targetUserId,
+      permissionIds: rows.map(r => r.permission_id),
+      permissionCodes: rows.map(r => r.code),
+      details: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Event-Scoped Permissions: PUT /api/users/event-permissions
+ * Body: { eventId: 1, userId: 2 (or all admins for event), permissionIds: [1, 2, 3] }
+ */
+async function updateEventPermissions(req, res, next) {
+  try {
+    const { eventId, userId, permissionIds = [] } = req.body;
+    const ipAddress = req.ip || req.connection.remoteAddress;
+    const userAgent = req.headers['user-agent'];
+
+    if (!eventId) {
+      return res.status(400).json({ success: false, message: 'Event ID is required' });
+    }
+
+    const targetEventId = parseInt(eventId, 10);
+
+    // Target specific user or all event admins for this event
+    let targetUserIds = [];
+    if (userId) {
+      targetUserIds = [parseInt(userId, 10)];
+    } else {
+      const admins = await query('SELECT id FROM users WHERE role_id = 2 AND (event_id = ? OR event_id IS NULL)', [targetEventId]);
+      targetUserIds = admins.map(a => a.id);
+    }
+
+    if (targetUserIds.length === 0) {
+      // Find any event admin or create entry for role 2 admins
+      const anyAdmins = await query('SELECT id FROM users WHERE role_id = 2');
+      targetUserIds = anyAdmins.map(a => a.id);
+    }
+
+    await withTransaction(async (conn) => {
+      for (const uId of targetUserIds) {
+        await conn.query('DELETE FROM admin_event_permissions WHERE user_id = ? AND event_id = ?', [uId, targetEventId]);
+        for (const pId of permissionIds) {
+          await conn.query(
+            'INSERT INTO admin_event_permissions (user_id, event_id, permission_id) VALUES (?, ?, ?)',
+            [uId, targetEventId, pId]
+          );
+        }
+      }
+    });
+
+    await logAudit({
+      userId: req.user?.id,
+      userName: req.user?.name,
+      action: 'UPDATE_EVENT_PERMISSIONS',
+      entity: 'EVENT_PERMISSIONS',
+      entityId: targetEventId,
+      newValue: { eventId: targetEventId, userIds: targetUserIds, permissionIds },
+      ipAddress,
+      userAgent
+    });
+
+    res.json({
+      success: true,
+      message: `Event #${targetEventId} permissions updated successfully for ${targetUserIds.length} admin account(s)`
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   getUsers,
   createUser,
   updateUser,
   getRolesAndPermissions,
-  updateRolePermissions
+  updateRolePermissions,
+  getEventPermissions,
+  updateEventPermissions
 };

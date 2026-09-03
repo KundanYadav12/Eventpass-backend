@@ -14,6 +14,9 @@ const passController = require('../controllers/passController');
 const scanController = require('../controllers/scanController');
 const printController = require('../controllers/printController');
 const categoryController = require('../controllers/categoryController');
+const passStyleController = require('../controllers/passStyleController');
+const billingController = require('../controllers/billingController');
+const deliveryController = require('../controllers/deliveryController');
 const userController = require('../controllers/userController');
 const messageController = require('../controllers/messageController');
 const auditController = require('../controllers/auditController');
@@ -51,10 +54,10 @@ router.put('/events/:id/status', authenticateToken, requireRole('SUPERADMIN'), e
 // 4. Dashboard Analytics
 router.get('/dashboard/stats', authenticateToken, scopeEventAccess, dashboardController.getDashboardStats);
 
-// 5. Pass Management Routes
+// 5. Pass Management Routes (Require 'passes.generate' permission)
 router.get('/passes', authenticateToken, scopeEventAccess, passController.getPasses);
 router.get('/passes/:id', authenticateToken, scopeEventAccess, passController.getPassById);
-router.post('/passes/generate', authenticateToken, requireRole('SUPERADMIN'), scopeEventAccess, passController.generatePasses);
+router.post('/passes/generate', authenticateToken, requirePermission('passes.generate'), scopeEventAccess, passController.generatePasses);
 router.post('/passes/:id/renew', authenticateToken, requireRole('SUPERADMIN'), passController.renewPass);
 router.post('/passes/bulk-renew', authenticateToken, requireRole('SUPERADMIN'), passController.bulkRenewPasses);
 router.post('/passes/:id/void', authenticateToken, requireRole('SUPERADMIN'), passController.voidPass);
@@ -64,13 +67,33 @@ router.post('/passes/:id/reissue', authenticateToken, requireRole('SUPERADMIN'),
 router.post('/scan', scanLimiter, optionalAuth, scanController.scan);
 router.get('/scan/history', authenticateToken, scopeEventAccess, scanController.getScanHistory);
 
-// 7. Category Routes (Admin: View-Only; SuperAdmin: Create/Edit/Delete)
+// 7. Category Routes (Require 'categories.create' permission for creation)
 router.get('/categories', authenticateToken, scopeEventAccess, categoryController.getCategories);
-router.post('/categories', authenticateToken, requireRole('SUPERADMIN'), scopeEventAccess, categoryController.createCategory);
+router.post('/categories', authenticateToken, requirePermission('categories.create'), scopeEventAccess, categoryController.createCategory);
 router.put('/categories/:id', authenticateToken, requireRole('SUPERADMIN'), categoryController.updateCategory);
 router.delete('/categories/:id', authenticateToken, requireRole('SUPERADMIN'), categoryController.deleteCategory);
 
-// 8. Print Batch Management & TSC TE244 Hardware Routes (SuperAdmin Only)
+// 8. Pass Style / Designer Routes
+router.get('/pass-styles', authenticateToken, scopeEventAccess, requirePermission(['pass_styles.view', 'pass_styles.use', 'billing.create', 'passes.generate']), passStyleController.getStyles);
+router.get('/pass-styles/:id', authenticateToken, scopeEventAccess, requirePermission(['pass_styles.view', 'pass_styles.use', 'billing.create', 'passes.generate']), passStyleController.getStyleById);
+router.post('/pass-styles', authenticateToken, scopeEventAccess, requirePermission('pass_styles.create'), passStyleController.createStyle);
+router.put('/pass-styles/:id', authenticateToken, scopeEventAccess, requirePermission('pass_styles.edit'), passStyleController.updateStyle);
+router.delete('/pass-styles/:id', authenticateToken, scopeEventAccess, requirePermission('pass_styles.delete'), passStyleController.deleteStyle);
+
+// 9. Customer Billing & Pass Issuance Routes
+router.post('/billing/preview', authenticateToken, scopeEventAccess, requirePermission('billing.create'), billingController.previewBilling);
+router.post('/billing/issue-and-send', authenticateToken, scopeEventAccess, requirePermission('billing.create'), billingController.issuePassesAndBill);
+router.get('/billing/history', authenticateToken, scopeEventAccess, billingController.getBillingHistory);
+
+// Public Customer PDF Downloads (Secured by unguessable cryptographic token — no login needed)
+router.get('/public/download/pass/:token', billingController.downloadPassPdfByToken);
+router.get('/public/download/bill/:token', billingController.downloadBillPdfByToken);
+router.get('/billing/download/pass/:token', billingController.downloadPassPdfByToken);
+router.get('/billing/download/bill/:token', billingController.downloadBillPdfByToken);
+router.get('/billing/:id/download-pass', billingController.downloadPassPdfByToken);
+router.get('/billing/:id/download-bill', billingController.downloadBillPdfByToken);
+
+// 10. Print Batch Management & TSC TE244 Hardware Routes (SuperAdmin Only)
 router.get('/print/batches', authenticateToken, scopeEventAccess, printController.getBatches);
 router.post('/print/batches', authenticateToken, requireRole('SUPERADMIN'), scopeEventAccess, printController.createBatch);
 router.get('/print/batches/:id', authenticateToken, printController.getBatchById);
@@ -95,18 +118,28 @@ router.post('/print/gateway/heartbeat', printController.gatewayHeartbeat);
 router.get('/print/gateway/pending', printController.gatewayPending);
 router.post('/print/gateway/jobs/:id/status', printController.gatewayJobStatus);
 
-// 9. User & RBAC Management (SuperAdmin only)
+// 11. User & RBAC Management (SuperAdmin only)
 router.get('/users', authenticateToken, scopeEventAccess, requireRole('SUPERADMIN'), userController.getUsers);
-router.post('/users', authenticateToken, scopeEventAccess, requireRole('SUPERADMIN'), userController.createUser);
-router.put('/users/:id', authenticateToken, scopeEventAccess, requireRole('SUPERADMIN'), userController.updateUser);
 router.get('/users/roles-permissions', authenticateToken, requireRole('SUPERADMIN'), userController.getRolesAndPermissions);
 router.put('/users/roles/:roleId/permissions', authenticateToken, requireRole('SUPERADMIN'), userController.updateRolePermissions);
+router.get('/users/event-permissions', authenticateToken, requireRole('SUPERADMIN'), userController.getEventPermissions);
+router.put('/users/event-permissions', authenticateToken, requireRole('SUPERADMIN'), userController.updateEventPermissions);
+router.post('/users', authenticateToken, scopeEventAccess, requireRole('SUPERADMIN'), userController.createUser);
+router.put('/users/:id', authenticateToken, scopeEventAccess, requireRole('SUPERADMIN'), userController.updateUser);
 
-// 10. Messages Configuration
+// 12. Messages Configuration
 router.get('/messages', authenticateToken, scopeEventAccess, messageController.getMessages);
 router.put('/messages/:key', authenticateToken, requireRole('SUPERADMIN'), messageController.updateMessage);
 
-// 11. Audit Logs
+// 13. Audit Logs
 router.get('/audit', authenticateToken, scopeEventAccess, requireRole('SUPERADMIN'), auditController.getAuditLogs);
+
+// 14. Event-Scoped Email & WhatsApp Delivery Routes
+router.get('/events/:eventId/delivery/email', authenticateToken, scopeEventAccess, deliveryController.getEmailSettings);
+router.put('/events/:eventId/delivery/email', authenticateToken, scopeEventAccess, deliveryController.updateEmailSettings);
+router.post('/events/:eventId/delivery/email/test', authenticateToken, scopeEventAccess, deliveryController.testEmail);
+router.get('/events/:eventId/delivery/whatsapp', authenticateToken, scopeEventAccess, deliveryController.getWhatsappSettings);
+router.put('/events/:eventId/delivery/whatsapp', authenticateToken, scopeEventAccess, deliveryController.updateWhatsappSettings);
+router.get('/events/:eventId/delivery/logs', authenticateToken, scopeEventAccess, deliveryController.getDeliveryLogs);
 
 module.exports = router;

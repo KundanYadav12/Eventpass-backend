@@ -1,81 +1,107 @@
 const crypto = require('crypto');
-const dotenv = require('dotenv');
-dotenv.config();
 
-const HMAC_SECRET = process.env.HMAC_SECRET || 'eventgen_pass_hmac_sha256_cryptographic_secret_9981';
+const SECRET_KEY = crypto
+  .createHash('sha256')
+  .update(process.env.ENCRYPTION_KEY || process.env.JWT_SECRET || 'eventgen_vault_master_key_2026_aes_gcm_salt')
+  .digest();
 
-// Unambiguous 32-character alphanumeric set (excluding confusing characters: 0, O, 1, I, L)
-const CHARSET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
+const ALGORITHM = 'aes-256-gcm';
 
-/**
- * Generate a cryptographically secure, non-sequential, unambiguous 7-character pass code
- * @param {number} length - Length of pass code (strictly 7 characters)
- * @returns {string} e.g. "55KDBD2", "T7A3ATC", "M77DA1V"
- */
-function generateSecureRandomCode(length = 7) {
-  const bytes = crypto.randomBytes(length * 2);
-  let result = '';
-  let i = 0;
-  while (result.length < length && i < bytes.length) {
-    const byte = bytes[i];
-    if (byte < 256 - (256 % CHARSET.length)) {
-      result += CHARSET[byte % CHARSET.length];
-    }
-    i++;
-  }
-  // Fallback if needed
-  while (result.length < length) {
-    const extra = crypto.randomBytes(1)[0];
-    result += CHARSET[extra % CHARSET.length];
-  }
-  return result;
-}
+// 32-character unambiguous charset (excluding 0, O, 1, I, L)
+const UNAMBIGUOUS_CHARSET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
 
 /**
- * Generate pass code strictly as 7 characters (no hardcoded prefixes)
- * @returns {string} 7-character string e.g. "55KDBD2"
+ * Generate a strictly 7-character unambiguous alphanumeric pass code
  */
 function generatePassCode() {
-  return generateSecureRandomCode(7);
+  let code = '';
+  const bytes = crypto.randomBytes(7);
+  for (let i = 0; i < 7; i++) {
+    code += UNAMBIGUOUS_CHARSET[bytes[i] % UNAMBIGUOUS_CHARSET.length];
+  }
+  return code;
 }
 
 /**
- * Generate HMAC-SHA256 signature for a pass code
- * @param {string} code 
- * @returns {string} 64-character hex signature
+ * Generate HMAC SHA256 signature for security verification
  */
 function generateHmacSignature(code) {
-  return crypto
-    .createHmac('sha256', HMAC_SECRET)
-    .update(String(code).trim().toUpperCase())
-    .digest('hex');
+  const secret = process.env.HMAC_SECRET || 'eventpass_super_secret_hmac_key_2026';
+  return crypto.createHmac('sha256', secret).update(String(code).toUpperCase()).digest('hex');
 }
 
 /**
- * Verify HMAC signature with constant-time comparison to prevent timing attacks
- * @param {string} code 
- * @param {string} expectedSig 
- * @returns {boolean}
+ * Verify HMAC signature
  */
-function verifyHmacSignature(code, expectedSig) {
-  if (!code || !expectedSig) return false;
-  const actualSig = generateHmacSignature(code);
-  
-  if (actualSig.length !== expectedSig.length) return false;
+function verifyHmacSignature(code, signature) {
+  if (!code || !signature) return false;
+  const expected = generateHmacSignature(code);
+  return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signature, 'hex'));
+}
 
-  const actualBuffer = Buffer.from(actualSig, 'hex');
-  const expectedBuffer = Buffer.from(expectedSig, 'hex');
+/**
+ * Encrypt a plain text secret using AES-256-GCM
+ */
+function encryptSecret(plainText) {
+  if (!plainText || typeof plainText !== 'string') return null;
+
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv(ALGORITHM, SECRET_KEY, iv);
+
+  let encrypted = cipher.update(plainText, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+
+  const authTag = cipher.getAuthTag().toString('hex');
+
+  return {
+    encrypted,
+    iv: iv.toString('hex'),
+    authTag
+  };
+}
+
+/**
+ * Decrypt an AES-256-GCM encrypted secret
+ */
+function decryptSecret(encryptedHex, ivHex, authTagHex) {
+  if (!encryptedHex || !ivHex || !authTagHex) return null;
 
   try {
-    return crypto.timingSafeEqual(actualBuffer, expectedBuffer);
-  } catch (e) {
-    return false;
+    const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(authTagHex, 'hex');
+    const decipher = crypto.createDecipheriv(ALGORITHM, SECRET_KEY, iv);
+    decipher.setAuthTag(authTag);
+
+    let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch (err) {
+    console.error('[Crypto Error] Failed to decrypt credential:', err.message);
+    return null;
   }
+}
+
+/**
+ * Returns a masked version of a secret for secure API serialization
+ */
+function maskSecret(hasValue) {
+  return hasValue ? '••••••••' : '';
+}
+
+/**
+ * Generate a cryptographically secure, random, non-sequential token (e.g. 16 hex characters)
+ */
+function generateSecureToken(length = 16) {
+  return crypto.randomBytes(Math.ceil(length / 2)).toString('hex').slice(0, length);
 }
 
 module.exports = {
-  generateSecureRandomCode,
   generatePassCode,
   generateHmacSignature,
-  verifyHmacSignature
+  verifyHmacSignature,
+  generateSecureToken,
+  encryptSecret,
+  decryptSecret,
+  maskSecret
 };
+

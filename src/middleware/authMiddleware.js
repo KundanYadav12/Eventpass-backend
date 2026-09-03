@@ -42,25 +42,65 @@ async function authenticateToken(req, res, next) {
 
     const user = users[0];
 
-    // Fetch user permissions
-    const permissions = await query(
-      `SELECT p.code FROM permissions p
-       JOIN role_permissions rp ON p.id = rp.permission_id
-       WHERE rp.role_id = ?`,
-      [user.role_id]
-    );
+    // Fetch event-scoped permissions map: { [eventId]: [code1, code2, ...] }
+    const eventPermissionsMap = {};
+    if (user.role_name === 'SUPERADMIN') {
+      const allPerms = await query('SELECT code FROM permissions');
+      const allCodes = allPerms.map(p => p.code);
+      // SuperAdmin has all permissions globally
+      req.user = {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role_name,
+        roleId: user.role_id,
+        eventId: user.event_id,
+        eventName: user.event_name,
+        eventCode: user.event_code,
+        permissions: allCodes,
+        eventPermissions: {}
+      };
+    } else {
+      const eventPermRows = await query(
+        `SELECT aep.event_id, p.code
+         FROM admin_event_permissions aep
+         JOIN permissions p ON aep.permission_id = p.id
+         WHERE aep.user_id = ?`,
+        [user.id]
+      );
 
-    req.user = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role_name,
-      roleId: user.role_id,
-      eventId: user.event_id,
-      eventName: user.event_name,
-      eventCode: user.event_code,
-      permissions: permissions.map(p => p.code)
-    };
+      for (const row of eventPermRows) {
+        if (!eventPermissionsMap[row.event_id]) {
+          eventPermissionsMap[row.event_id] = [];
+        }
+        eventPermissionsMap[row.event_id].push(row.code);
+      }
+
+      // Default permissions for user's assigned event or fallback to role_permissions
+      let defaultPerms = user.event_id && eventPermissionsMap[user.event_id] ? eventPermissionsMap[user.event_id] : [];
+      if (defaultPerms.length === 0) {
+        const rolePerms = await query(
+          `SELECT p.code FROM permissions p
+           JOIN role_permissions rp ON p.id = rp.permission_id
+           WHERE rp.role_id = ?`,
+          [user.role_id]
+        );
+        defaultPerms = rolePerms.map(p => p.code);
+      }
+
+      req.user = {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role_name,
+        roleId: user.role_id,
+        eventId: user.event_id,
+        eventName: user.event_name,
+        eventCode: user.event_code,
+        permissions: defaultPerms,
+        eventPermissions: eventPermissionsMap
+      };
+    }
 
     next();
   } catch (err) {

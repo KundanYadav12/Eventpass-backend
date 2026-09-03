@@ -19,25 +19,32 @@ function getEmailTransporter() {
   return transporter;
 }
 
-async function sendEmail({ to, subject, html, text }) {
-  const from = process.env.EMAIL_FROM || '"EventGen Support" <noreply@eventgen.duckdns.org>';
+async function sendEmail({ to, subject, html, text, from: customFrom, replyTo, attachments = [] }) {
+  const from = customFrom || process.env.EMAIL_FROM || '"EventGen Support" <noreply@eventgen.duckdns.org>';
   
   // If SMTP is not configured or in test mode, log email instead of failing
   if (!process.env.EMAIL_PASS || process.env.EMAIL_PASS.startsWith('mock_')) {
-    console.log(`[Email Preview] (SMTP Simulated) To: ${to} | Subject: ${subject}`);
+    console.log(`[Email Preview] (SMTP Simulated) From: ${from} | To: ${to} | Subject: ${subject}`);
+    console.log(`[Email Attachments]: ${attachments.map(a => a.filename).join(', ') || 'None'}`);
     console.log(`[Email Content]:\n${text || html}\n`);
     return { success: true, messageId: 'simulated-' + Date.now() };
   }
 
   try {
     const t = getEmailTransporter();
-    const info = await t.sendMail({
+    const mailOptions = {
       from,
       to,
       subject,
       text,
       html
-    });
+    };
+    if (replyTo) mailOptions.replyTo = replyTo;
+    if (Array.isArray(attachments) && attachments.length > 0) {
+      mailOptions.attachments = attachments;
+    }
+
+    const info = await t.sendMail(mailOptions);
     return { success: true, messageId: info.messageId };
   } catch (error) {
     console.error('[Email Error] Failed to send email:', error.message);
