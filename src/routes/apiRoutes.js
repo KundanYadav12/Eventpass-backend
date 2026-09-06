@@ -113,6 +113,7 @@ router.get('/print/batches', authenticateToken, scopeEventAccess, printControlle
 router.post('/print/batches', authenticateToken, requireRole('SUPERADMIN'), scopeEventAccess, printController.createBatch);
 router.get('/print/batches/:id', authenticateToken, printController.getBatchById);
 router.post('/print/batches/:id/process', authenticateToken, requireRole('SUPERADMIN'), printController.processChunk);
+router.post('/print/batches/:id/process-chunk', authenticateToken, requireRole('SUPERADMIN'), printController.processChunk);
 router.post('/print/batches/:id/pause', authenticateToken, requireRole('SUPERADMIN'), printController.pauseBatch);
 router.post('/print/batches/:id/resume', authenticateToken, requireRole('SUPERADMIN'), printController.resumeBatch);
 router.post('/print/batches/:id/reprint', authenticateToken, requireRole('SUPERADMIN'), printController.reprintBatch);

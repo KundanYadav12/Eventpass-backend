@@ -33,7 +33,7 @@ async function getPrintBatches({ eventId = null, status = 'all', page = 1, limit
   const total = countResult ? countResult.total : 0;
 
   const batches = await query(
-    `SELECT pb.*, u.name as created_by_name, c.name as category_name, e.event_name
+    `SELECT pb.*, pb.total_requested as quantity, u.name as created_by_name, c.name as category_name, e.event_name
      FROM print_batches pb
      LEFT JOIN users u ON pb.created_by = u.id
      LEFT JOIN pass_categories c ON pb.category_id = c.id
@@ -442,11 +442,27 @@ async function processBatchChunk(batchId, chunkSize = 50, printerName = null, { 
     );
 
     return {
+      batchId: curBatch.id,
       status: newStatus,
       printedNow: unprintedPasses.length,
+      printedInThisChunk: unprintedPasses.length,
       totalPrinted: newPrintedCount,
+      totalPrintedSoFar: newPrintedCount,
+      totalQuantity: curBatch.total_requested,
+      quantity: curBatch.total_requested,
+      isCompleted: isFinished,
       remaining: Math.max(0, curBatch.total_requested - newPrintedCount),
-      tsplData: payload
+      tsplData: payload,
+      rawPayload: payload,
+      passes: unprintedPasses.map(p => ({
+        id: p.id,
+        code: p.code,
+        categoryName: p.category_name,
+        category_name: p.category_name,
+        eventName: p.event_name,
+        event_name: p.event_name,
+        barcode_pattern: curBatch.barcode_pattern || 'QR_CODE'
+      }))
     };
   });
 }

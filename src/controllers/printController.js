@@ -20,8 +20,9 @@ async function getBatches(req, res, next) {
 
 async function createBatch(req, res, next) {
   try {
-    const { eventId, categoryId, name, quantity, barcodePattern = 'QR_CODE' } = req.body;
+    const { eventId, categoryId, name, batchName, quantity, barcodePattern = 'QR_CODE' } = req.body;
     const targetEventId = req.effectiveEventId || eventId;
+    const targetName = name || batchName;
     const ipAddress = req.ip || req.connection.remoteAddress;
     const userAgent = req.headers['user-agent'];
 
@@ -32,7 +33,7 @@ async function createBatch(req, res, next) {
     const result = await printService.createPrintBatch({
       eventId: targetEventId,
       categoryId,
-      name,
+      name: targetName,
       quantity,
       barcodePattern,
       userId: req.user?.id,
