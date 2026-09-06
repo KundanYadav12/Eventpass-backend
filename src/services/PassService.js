@@ -1,7 +1,16 @@
+const ExcelJS = require('exceljs');
 const { query, withTransaction } = require('../config/db');
-const { generatePassCode, generateHmacSignature } = require('../utils/cryptoUtil');
+const { generatePassCode, generateHmacSignature, generateSecureToken } = require('../utils/cryptoUtil');
 const { logAudit } = require('./AuditService');
-const { formatMySqlDateTime } = require('../utils/timeUtil');
+const {
+  formatDateTimeIST,
+  formatDateIST,
+  formatTimeIST,
+  formatMySqlDateTime,
+  getISTDateRangeBoundsUTC
+} = require('../utils/timeUtil');
+const { generatePassPdf, generateBillPdf } = require('./pdfService');
+const eventDeliveryService = require('./eventDeliveryService');
 
 /**
  * Get paginated list of passes with event scoping and dynamic filters
@@ -14,16 +23,19 @@ async function getPasses({
   search = '',
   passType = '',
   status = '',
+  sharingMethod = '',
   printed = '',
   usageState = '',
   validityState = '',
   dateFrom = '',
   dateTo = '',
+  sharedFrom = '',
+  sharedTo = '',
   sortBy = 'id',
-  sortDir = 'ASC'
+  sortDir = 'DESC'
 }) {
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
-  const pageLimit = Math.min(100, Math.max(10, parseInt(limit, 10) || 20));
+  const pageLimit = Math.min(100, Math.max(5, parseInt(limit, 10) || 20));
   const offset = (pageNum - 1) * pageLimit;
 
   const whereConditions = [];
@@ -41,15 +53,16 @@ async function getPasses({
     queryParams.push(parseInt(categoryId, 10));
   }
 
-  // Search by 7-char code or numeric ID
+  // Search by Pass Code, ID, Customer Name, Email, Phone, Sponsor, or Bill Number
   if (search && search.trim()) {
     const cleanSearch = search.trim();
+    const searchWildcard = `%${cleanSearch}%`;
     if (/^\d+$/.test(cleanSearch)) {
-      whereConditions.push('(p.id = ? OR p.code LIKE ?)');
-      queryParams.push(parseInt(cleanSearch, 10), `%${cleanSearch}%`);
+      whereConditions.push('(p.id = ? OR p.code LIKE ? OR p.customer_name LIKE ? OR p.customer_email LIKE ? OR p.customer_phone LIKE ? OR b.bill_number LIKE ?)');
+      queryParams.push(parseInt(cleanSearch, 10), searchWildcard, searchWildcard, searchWildcard, searchWildcard, searchWildcard);
     } else {
-      whereConditions.push('p.code LIKE ?');
-      queryParams.push(`%${cleanSearch}%`);
+      whereConditions.push('(p.code LIKE ? OR p.customer_name LIKE ? OR p.customer_email LIKE ? OR p.customer_phone LIKE ? OR p.sponsor_name LIKE ? OR b.bill_number LIKE ?)');
+      queryParams.push(searchWildcard, searchWildcard, searchWildcard, searchWildcard, searchWildcard, searchWildcard);
     }
   }
 
@@ -63,6 +76,12 @@ async function getPasses({
   if (status && status !== 'all') {
     whereConditions.push('p.status = ?');
     queryParams.push(status);
+  }
+
+  // Filter by Sharing Method (EMAIL, WHATSAPP, BOTH, NONE)
+  if (sharingMethod && sharingMethod !== 'all') {
+    whereConditions.push('p.sharing_method = ?');
+    queryParams.push(sharingMethod);
   }
 
   // Filter by Printed status
@@ -89,42 +108,72 @@ async function getPasses({
     queryParams.push(now);
   }
 
-  // Date Range filter
-  if (dateFrom) {
-    whereConditions.push('p.valid_from >= ?');
-    queryParams.push(`${dateFrom} 00:00:00`);
+  // Validity Date Range filter (in IST)
+  if (dateFrom || dateTo) {
+    const { startUtc, endUtc } = getISTDateRangeBoundsUTC(dateFrom, dateTo);
+    if (startUtc) {
+      whereConditions.push('p.valid_from >= ?');
+      queryParams.push(startUtc);
+    }
+    if (endUtc) {
+      whereConditions.push('p.valid_until <= ?');
+      queryParams.push(endUtc);
+    }
   }
-  if (dateTo) {
-    whereConditions.push('p.valid_until <= ?');
-    queryParams.push(`${dateTo} 23:59:59`);
+
+  // Shared Date Range filter (in IST)
+  if (sharedFrom || sharedTo) {
+    const { startUtc, endUtc } = getISTDateRangeBoundsUTC(sharedFrom, sharedTo);
+    if (startUtc) {
+      whereConditions.push('p.last_shared_at >= ?');
+      queryParams.push(startUtc);
+    }
+    if (endUtc) {
+      whereConditions.push('p.last_shared_at <= ?');
+      queryParams.push(endUtc);
+    }
   }
 
   const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
 
-  const allowedSorts = ['id', 'code', 'code_type', 'status', 'valid_from', 'valid_until', 'scan_count', 'printed', 'created_at', 'last_scanned_at'];
+  const allowedSorts = [
+    'id', 'code', 'code_type', 'status', 'valid_from', 'valid_until',
+    'scan_count', 'printed', 'created_at', 'last_scanned_at', 'first_scanned_at',
+    'customer_name', 'customer_email', 'customer_phone', 'sharing_method',
+    'first_shared_at', 'last_shared_at', 'reshare_count'
+  ];
   const safeSortBy = allowedSorts.includes(sortBy) ? `p.${sortBy}` : 'p.id';
-  const safeSortDir = sortDir.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+  const safeSortDir = sortDir.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
   // Count total records
   const countSql = `
     SELECT COUNT(*) as total
     FROM passes p
     LEFT JOIN pass_categories c ON p.category_id = c.id
+    LEFT JOIN billings b ON p.billing_id = b.id
     ${whereClause}
   `;
   const [countResult] = await query(countSql, queryParams);
   const totalRecords = countResult ? countResult.total : 0;
   const totalPages = Math.ceil(totalRecords / pageLimit);
 
-  // Fetch paginated rows
+  // Fetch paginated rows with full customer and billing details
   const dataSql = `
     SELECT p.id, p.event_id, p.category_id, p.code, p.code_type, p.category_prefix, p.status,
            p.valid_from, p.valid_until, p.issued_at, p.first_scanned_at, p.last_scanned_at,
-           p.scan_count, p.printed, p.print_batch_id, p.created_at, p.updated_at,
-           c.name as category_name, e.event_name, e.event_code
+           p.scan_count, p.printed, p.print_batch_id, p.billing_id, p.style_id,
+           p.customer_name, p.customer_email, p.customer_phone, p.sponsor_name,
+           p.sharing_method, p.first_shared_at, p.last_shared_at, p.reshare_count, p.shared_by,
+           p.created_at, p.updated_at,
+           c.name as category_name, c.price as category_price,
+           e.event_name, e.event_code,
+           b.bill_number, b.total_amount, b.gst_mode, b.gst_amount, b.download_token,
+           u.name as shared_by_name
     FROM passes p
     LEFT JOIN pass_categories c ON (p.category_id = c.id OR (p.code_type = c.code AND p.event_id = c.event_id))
     LEFT JOIN events e ON p.event_id = e.id
+    LEFT JOIN billings b ON p.billing_id = b.id
+    LEFT JOIN users u ON p.shared_by = u.id
     ${whereClause}
     ORDER BY ${safeSortBy} ${safeSortDir}
     LIMIT ? OFFSET ?
@@ -146,18 +195,22 @@ async function getPasses({
 }
 
 /**
- * Get single pass details with scan history and print logs
+ * Get single pass details with scan history, print logs, and communication history
  */
 async function getPassDetails(id) {
   const passes = await query(
     `SELECT p.*,
-            c.name as category_name, c.description as category_description,
-            e.id as event_id, e.event_name, e.event_code,
-            pb.name as print_batch_name, pb.status as print_batch_status
+            c.name as category_name, c.description as category_description, c.price as category_price,
+            e.id as event_id, e.event_name, e.event_code, e.venue,
+            pb.name as print_batch_name, pb.status as print_batch_status,
+            b.bill_number, b.download_token, b.subtotal, b.gst_mode, b.gst_amount, b.total_amount,
+            u.name as shared_by_name
      FROM passes p
      LEFT JOIN pass_categories c ON (p.category_id = c.id OR (p.code_type = c.code AND p.event_id = c.event_id))
      LEFT JOIN events e ON p.event_id = e.id
      LEFT JOIN print_batches pb ON p.print_batch_id = pb.id
+     LEFT JOIN billings b ON p.billing_id = b.id
+     LEFT JOIN users u ON p.shared_by = u.id
      WHERE p.id = ?`,
     [id]
   );
@@ -167,6 +220,16 @@ async function getPassDetails(id) {
   }
 
   const pass = passes[0];
+
+  // Fetch communication and reshare history
+  const communicationHistory = await query(
+    `SELECT pch.*, u.name as operator_name
+     FROM pass_communication_history pch
+     LEFT JOIN users u ON pch.shared_by = u.id
+     WHERE pch.pass_id = ?
+     ORDER BY pch.shared_at DESC`,
+    [pass.id]
+  );
 
   // Fetch scan history
   const scanHistory = await query(
@@ -200,10 +263,417 @@ async function getPassDetails(id) {
 
   return {
     pass,
+    communicationHistory,
     scanHistory,
     printLogs,
     auditHistory
   };
+}
+
+/**
+ * Reshare an existing pass via Email and/or WhatsApp
+ * Updates communication history and reshare counters without generating new pass codes.
+ */
+async function resharePass({
+  passId,
+  sharingMethod = 'EMAIL', // 'EMAIL' | 'WHATSAPP' | 'BOTH'
+  customerEmail = null,
+  customerPhone = null,
+  emailSubject = null,
+  notes = null,
+  userId = null,
+  userName = '',
+  ipAddress = null,
+  userAgent = null,
+  baseUrl = null
+}) {
+  const passRows = await query(
+    `SELECT p.*,
+            c.name as category_name, c.code as category_code, c.price as category_price,
+            e.id as resolved_event_id, e.event_name, e.event_code, e.venue,
+            b.id as billing_id, b.bill_number, b.download_token, b.subtotal, b.gst_mode, b.gst_rate, b.gst_amount, b.total_amount,
+            s.id as style_id, s.name as style_name
+     FROM passes p
+     JOIN events e ON p.event_id = e.id
+     JOIN pass_categories c ON (p.category_id = c.id OR (p.code_type = c.code AND p.event_id = c.event_id))
+     LEFT JOIN billings b ON p.billing_id = b.id
+     LEFT JOIN pass_styles s ON p.style_id = s.id
+     WHERE p.id = ?`,
+    [passId]
+  );
+
+  if (!passRows || passRows.length === 0) {
+    throw new Error('Pass not found');
+  }
+
+  const pass = passRows[0];
+  const eventId = pass.event_id;
+  const now = new Date();
+
+  // Determine effective contact information (use incoming or existing)
+  const targetCustomerName = pass.customer_name || 'Valued Guest';
+  const targetEmail = customerEmail !== undefined && customerEmail !== null ? customerEmail.trim().toLowerCase() : (pass.customer_email || '');
+  const targetPhone = customerPhone !== undefined && customerPhone !== null ? customerPhone.trim() : (pass.customer_phone || '');
+
+  if (sharingMethod === 'EMAIL' && !targetEmail) {
+    throw new Error('Valid email address is required for Email reshare');
+  }
+  if (sharingMethod === 'WHATSAPP' && !targetPhone) {
+    throw new Error('Valid WhatsApp phone number is required for WhatsApp reshare');
+  }
+  if (sharingMethod === 'BOTH' && (!targetEmail || !targetPhone)) {
+    throw new Error('Both Email address and WhatsApp number are required for dual-channel reshare');
+  }
+
+  // 1. Fetch style or default
+  let style = null;
+  if (pass.style_id) {
+    const styleRows = await query('SELECT * FROM pass_styles WHERE id = ?', [pass.style_id]);
+    if (styleRows && styleRows.length > 0) style = styleRows[0];
+  }
+  if (!style) {
+    const defaultStyles = await query(
+      'SELECT * FROM pass_styles WHERE (event_id = ? OR event_id IS NULL) ORDER BY is_default DESC, id ASC LIMIT 1',
+      [eventId]
+    );
+    if (defaultStyles && defaultStyles.length > 0) style = defaultStyles[0];
+  }
+
+  // 2. Generate PDFs
+  const passPdfBuffer = await generatePassPdf({
+    style,
+    pass: {
+      code: pass.code,
+      code_type: pass.code_type,
+      category_name: pass.category_name,
+      customer_name: targetCustomerName,
+      sponsor_name: pass.sponsor_name
+    },
+    event: { id: pass.event_id, event_name: pass.event_name, venue: pass.venue },
+    category: { id: pass.category_id, name: pass.category_name, code: pass.code_type },
+    customer: { name: targetCustomerName, email: targetEmail, phone: targetPhone },
+    sponsor: pass.sponsor_name
+  });
+
+  let billPdfBuffer = null;
+  if (pass.billing_id) {
+    billPdfBuffer = await generateBillPdf({
+      billing: {
+        id: pass.billing_id,
+        bill_number: pass.bill_number,
+        customer_name: targetCustomerName,
+        customer_email: targetEmail,
+        customer_phone: targetPhone,
+        sponsor_name: pass.sponsor_name,
+        quantity: 1,
+        unit_price: pass.category_price || 0,
+        subtotal: pass.subtotal || pass.category_price || 0,
+        gst_mode: pass.gst_mode || 'INCLUDED',
+        gst_rate: pass.gst_rate || 18,
+        gst_amount: pass.gst_amount || 0,
+        total_amount: pass.total_amount || pass.category_price || 0,
+        include_pass_code_on_bill: true,
+        created_at: pass.created_at
+      },
+      event: { id: pass.event_id, event_name: pass.event_name, venue: pass.venue },
+      category: { id: pass.category_id, name: pass.category_name },
+      passes: [pass]
+    });
+  }
+
+  // 3. Dispatch Email if selected
+  let emailDelivery = { success: false, status: 'NOT_REQUESTED' };
+  if ((sharingMethod === 'EMAIL' || sharingMethod === 'BOTH') && targetEmail) {
+    const subject = emailSubject || `${pass.event_name} — Resent Official Pass Confirmation (${pass.code})`;
+
+    const emailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1E293B; line-height: 1.6;">
+        <div style="background-color: #0F172A; padding: 24px; text-align: center; border-radius: 8px 8px 0 0;">
+          <h1 style="color: #FFFFFF; margin: 0; font-size: 22px;">${pass.event_name}</h1>
+          <p style="color: #94A3B8; margin: 6px 0 0 0; font-size: 13px;">Official Pass Confirmation (Resent)</p>
+        </div>
+        <div style="padding: 24px; border: 1px solid #E2E8F0; border-top: none; background-color: #FFFFFF; border-radius: 0 0 8px 8px;">
+          <p>Dear <strong>${targetCustomerName}</strong>,</p>
+          <p>Here is your official pass confirmation for <strong>${pass.event_name}</strong>.</p>
+          
+          <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 16px; margin: 20px 0;">
+            <table style="width: 100%; font-size: 13.5px;">
+              <tr><td style="color: #64748B;">Category:</td><td><strong>${pass.category_name}</strong></td></tr>
+              <tr><td style="color: #64748B;">Pass Code:</td><td style="font-family: monospace; font-weight: bold; color: #2563EB;">${pass.code}</td></tr>
+              <tr><td style="color: #64748B;">Status:</td><td><strong style="color: #047857;">${pass.status.toUpperCase()}</strong></td></tr>
+              ${pass.sponsor_name ? `<tr><td style="color: #64748B;">Sponsor:</td><td>${pass.sponsor_name}</td></tr>` : ''}
+            </table>
+          </div>
+
+          <p style="font-size: 13px; color: #64748B;">
+            <strong>Important:</strong> Please present the attached Pass PDF with its scannable barcode at the entrance gate.
+          </p>
+
+          <hr style="border: none; border-top: 1px solid #E2E8F0; margin: 24px 0;" />
+          <p style="font-size: 11.5px; color: #94A3B8; text-align: center;">
+            ${pass.event_name} • ${pass.venue || 'Event Venue'}<br />
+            Resent by ${userName || 'Event Operations Team'} on ${formatDateTimeIST(now)}
+          </p>
+        </div>
+      </div>
+    `;
+
+    const attachments = [
+      {
+        filename: `Pass_${pass.code}.pdf`,
+        content: passPdfBuffer,
+        contentType: 'application/pdf'
+      }
+    ];
+
+    if (billPdfBuffer && pass.bill_number) {
+      attachments.push({
+        filename: `Invoice_${pass.bill_number}.pdf`,
+        content: billPdfBuffer,
+        contentType: 'application/pdf'
+      });
+    }
+
+    emailDelivery = await eventDeliveryService.sendEventEmail({
+      eventId,
+      billingId: pass.billing_id,
+      to: targetEmail,
+      subject,
+      html: emailHtml,
+      attachments
+    });
+  }
+
+  // 4. WhatsApp Delivery / Share Link if selected
+  let whatsappDelivery = { success: false, status: 'NOT_REQUESTED' };
+  if (sharingMethod === 'WHATSAPP' || sharingMethod === 'BOTH') {
+    whatsappDelivery = await eventDeliveryService.generateEventWhatsappDelivery({
+      eventId,
+      customerPhone: targetPhone,
+      customerName: targetCustomerName,
+      eventName: pass.event_name,
+      passCodes: [pass.code],
+      totalAmount: pass.total_amount || pass.category_price || 0,
+      billingId: pass.billing_id,
+      downloadToken: pass.download_token || generateSecureToken(16),
+      baseUrl: baseUrl || null,
+      passPdfBuffer,
+      billPdfBuffer
+    });
+  }
+
+  // 5. Atomic Update in Transaction
+  await withTransaction(async (conn) => {
+    // Update pass record with latest contact information, sharing timestamp, and increment reshare_count
+    await conn.query(
+      `UPDATE passes
+       SET customer_name = ?,
+           customer_email = ?,
+           customer_phone = ?,
+           sharing_method = ?,
+           first_shared_at = COALESCE(first_shared_at, NOW()),
+           last_shared_at = NOW(),
+           reshare_count = reshare_count + 1,
+           shared_by = ?,
+           updated_at = NOW()
+       WHERE id = ?`,
+      [
+        targetCustomerName,
+        targetEmail || null,
+        targetPhone || null,
+        sharingMethod,
+        userId,
+        passId
+      ]
+    );
+
+    // If customer updated email/phone and pass has a linked bill, keep billing record aligned
+    if (pass.billing_id) {
+      await conn.query(
+        `UPDATE billings
+         SET customer_name = ?,
+             customer_email = COALESCE(?, customer_email),
+             customer_phone = COALESCE(?, customer_phone)
+         WHERE id = ?`,
+        [targetCustomerName, targetEmail || null, targetPhone || null, pass.billing_id]
+      );
+    }
+
+    // Insert into pass_communication_history
+    await conn.query(
+      `INSERT INTO pass_communication_history (
+        pass_id, event_id, billing_id, customer_name, customer_email, customer_phone,
+        sharing_method, status, shared_by, shared_by_name, notes, shared_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        passId,
+        eventId,
+        pass.billing_id,
+        targetCustomerName,
+        targetEmail || null,
+        targetPhone || null,
+        sharingMethod,
+        (emailDelivery.status === 'SENT' || whatsappDelivery.status === 'READY') ? 'SENT' : 'READY',
+        userId,
+        userName || 'Admin',
+        notes || `Reshared via ${sharingMethod} by ${userName || 'Admin'}`
+      ]
+    );
+
+    // Audit Log
+    await conn.query(
+      `INSERT INTO audit_log (event_id, user_id, user_name, action, entity, entity_id, new_value, ip_address, user_agent, created_at)
+       VALUES (?, ?, ?, 'RESHARE_PASS', 'PASS', ?, ?, ?, ?, NOW())`,
+      [
+        eventId,
+        userId,
+        userName,
+        String(passId),
+        JSON.stringify({
+          passCode: pass.code,
+          sharingMethod,
+          customerName: targetCustomerName,
+          customerEmail: targetEmail,
+          customerPhone: targetPhone,
+          reshareCount: (pass.reshare_count || 0) + 1
+        }),
+        ipAddress,
+        userAgent
+      ]
+    );
+  });
+
+  const updatedDetails = await getPassDetails(passId);
+
+  return {
+    success: true,
+    message: `Pass ${pass.code} successfully reshared via ${sharingMethod}`,
+    pass: updatedDetails.pass,
+    communicationHistory: updatedDetails.communicationHistory,
+    emailDelivery,
+    whatsappUrl: whatsappDelivery.whatsappUrl || null,
+    whatsappDelivery,
+    passPdfBase64: passPdfBuffer.toString('base64'),
+    billPdfBase64: billPdfBuffer ? billPdfBuffer.toString('base64') : null
+  };
+}
+
+/**
+ * Generate formatted Excel (.xlsx) workbook containing filtered pass inventory records
+ */
+async function exportPassesExcel(filters) {
+  // Query all matching passes without small page limits (capped at 50,000 for server memory safety)
+  const result = await getPasses({
+    ...filters,
+    page: 1,
+    limit: 50000
+  });
+
+  const passes = result.passes || [];
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'EventGen Platform';
+  workbook.created = new Date();
+
+  const worksheet = workbook.addWorksheet('Pass Inventory', {
+    views: [{ state: 'frozen', ySplit: 1 }]
+  });
+
+  // Define Columns
+  worksheet.columns = [
+    { header: 'Pass ID', key: 'id', width: 10 },
+    { header: 'Pass Code', key: 'code', width: 14 },
+    { header: 'Event Name', key: 'event_name', width: 24 },
+    { header: 'Pass Category', key: 'category_name', width: 18 },
+    { header: 'Customer / Buyer Name', key: 'customer_name', width: 24 },
+    { header: 'Email Address', key: 'customer_email', width: 28 },
+    { header: 'WhatsApp Number', key: 'customer_phone', width: 18 },
+    { header: 'Sponsor', key: 'sponsor_name', width: 18 },
+    { header: 'Price (₹)', key: 'price', width: 12 },
+    { header: 'GST Mode', key: 'gst_mode', width: 12 },
+    { header: 'GST Amount (₹)', key: 'gst_amount', width: 14 },
+    { header: 'Total (₹)', key: 'total_amount', width: 14 },
+    { header: 'Invoice #', key: 'bill_number', width: 18 },
+    { header: 'Sharing Method', key: 'sharing_method', width: 16 },
+    { header: 'First Shared (IST)', key: 'first_shared_at', width: 22 },
+    { header: 'Last Shared (IST)', key: 'last_shared_at', width: 22 },
+    { header: 'Reshare Count', key: 'reshare_count', width: 14 },
+    { header: 'Scan Status', key: 'status', width: 14 },
+    { header: 'Scan Count', key: 'scan_count', width: 12 },
+    { header: 'First Scan Time (IST)', key: 'first_scanned_at', width: 22 },
+    { header: 'Last Scan Time (IST)', key: 'last_scanned_at', width: 22 },
+    { header: 'Valid From (IST)', key: 'valid_from', width: 20 },
+    { header: 'Valid Until (IST)', key: 'valid_until', width: 20 },
+    { header: 'Print Status', key: 'printed', width: 14 },
+    { header: 'Created Date (IST)', key: 'created_at', width: 22 }
+  ];
+
+  // Style Header Row
+  const headerRow = worksheet.getRow(1);
+  headerRow.font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+  headerRow.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF1E293B' } // Slate 800
+  };
+  headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+  headerRow.height = 28;
+
+  // Populate Data Rows with IST Formatted Timestamps
+  for (const p of passes) {
+    const row = worksheet.addRow({
+      id: p.id,
+      code: p.code,
+      event_name: p.event_name || 'Event 2026',
+      category_name: p.category_name || p.code_type,
+      customer_name: p.customer_name || '—',
+      customer_email: p.customer_email || '—',
+      customer_phone: p.customer_phone || '—',
+      sponsor_name: p.sponsor_name || '—',
+      price: parseFloat(p.category_price || p.total_amount || 0),
+      gst_mode: p.gst_mode || 'INCLUDED',
+      gst_amount: parseFloat(p.gst_amount || 0),
+      total_amount: parseFloat(p.total_amount || p.category_price || 0),
+      bill_number: p.bill_number || '—',
+      sharing_method: p.sharing_method || 'NONE',
+      first_shared_at: formatDateTimeIST(p.first_shared_at),
+      last_shared_at: formatDateTimeIST(p.last_shared_at),
+      reshare_count: p.reshare_count || 0,
+      status: (p.status || 'active').toUpperCase(),
+      scan_count: p.scan_count || 0,
+      first_scanned_at: formatDateTimeIST(p.first_scanned_at),
+      last_scanned_at: formatDateTimeIST(p.last_scanned_at),
+      valid_from: formatDateIST(p.valid_from),
+      valid_until: formatDateIST(p.valid_until),
+      printed: p.printed ? 'PRINTED' : 'UNPRINTED',
+      created_at: formatDateTimeIST(p.created_at)
+    });
+
+    row.font = { name: 'Arial', size: 10 };
+    row.alignment = { vertical: 'middle' };
+  }
+
+  // Auto-fit zebra striping and cell borders
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber > 1) {
+      if (rowNumber % 2 === 0) {
+        row.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFF8FAFC' }
+        };
+      }
+      row.eachCell((cell) => {
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          right: { style: 'thin', color: { argb: 'FFE2E8F0' } }
+        };
+      });
+    }
+  });
+
+  return workbook.xlsx.writeBuffer();
 }
 
 /**
@@ -469,6 +939,8 @@ async function reissuePass(id, { reason, userId, userName, ipAddress, userAgent 
 module.exports = {
   getPasses,
   getPassDetails,
+  resharePass,
+  exportPassesExcel,
   generatePasses,
   renewPass,
   bulkRenewPasses,

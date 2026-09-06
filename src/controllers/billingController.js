@@ -1,6 +1,7 @@
 const billingService = require('../services/BillingService');
 const { query } = require('../config/db');
-const { generatePassPdf, generateBillPdf } = require('../services/pdfService');
+const { generatePassPdf, generateMultiPassPdf, generateBillPdf } = require('../services/pdfService');
+const eventDeliveryService = require('../services/eventDeliveryService');
 
 async function previewBilling(req, res, next) {
   try {
@@ -196,27 +197,36 @@ async function downloadPassPdf(req, res, next) {
     if (!billings || billings.length === 0) return res.status(404).json({ success: false, message: 'Billing not found' });
     const billing = billings[0];
 
-    const passes = await query('SELECT * FROM passes WHERE billing_id = ? LIMIT 1', [id]);
+    const passes = await query('SELECT * FROM passes WHERE billing_id = ? ORDER BY id ASC', [id]);
     const events = await query('SELECT * FROM events WHERE id = ?', [billing.event_id]);
     const categories = await query('SELECT * FROM pass_categories WHERE id = ?', [billing.category_id]);
     const styles = billing.style_id ? await query('SELECT * FROM pass_styles WHERE id = ?', [billing.style_id]) : [];
 
-    const pass = passes[0] || { code: 'PASS001' };
     const event = events[0] || {};
     const category = categories[0] || {};
-    const style = styles[0] || null;
+    let style = styles[0] || null;
+    if (!style) {
+      const defaultStyles = await query(
+        'SELECT * FROM pass_styles WHERE (event_id = ? OR event_id IS NULL) ORDER BY is_default DESC, id ASC LIMIT 1',
+        [billing.event_id]
+      );
+      if (defaultStyles && defaultStyles.length > 0) style = defaultStyles[0];
+    }
 
-    const pdfBuffer = await generatePassPdf({
+    const pdfBuffer = await generateMultiPassPdf({
       style,
-      pass,
+      passes: passes.length > 0 ? passes : [{ code: 'PASS001' }],
       event,
       category,
-      customer: { name: billing.customer_name },
+      customer: { name: billing.customer_name, email: billing.customer_email, phone: billing.customer_phone },
       sponsor: billing.sponsor_name
     });
 
+    const filename = passes.length > 1 ? `Passes_${billing.bill_number}.pdf` : `Pass_${passes[0]?.code || 'PASS'}.pdf`;
+
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=Pass_${pass.code}.pdf`);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.send(pdfBuffer);
   } catch (error) {
     next(error);
@@ -230,7 +240,7 @@ async function downloadBillPdf(req, res, next) {
     if (!billings || billings.length === 0) return res.status(404).json({ success: false, message: 'Billing not found' });
     const billing = billings[0];
 
-    const passes = await query('SELECT * FROM passes WHERE billing_id = ?', [id]);
+    const passes = await query('SELECT * FROM passes WHERE billing_id = ? ORDER BY id ASC', [id]);
     const events = await query('SELECT * FROM events WHERE id = ?', [billing.event_id]);
     const categories = await query('SELECT * FROM pass_categories WHERE id = ?', [billing.category_id]);
 
@@ -245,7 +255,8 @@ async function downloadBillPdf(req, res, next) {
     });
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=Invoice_${billing.bill_number}.pdf`);
+    res.setHeader('Content-Disposition', `attachment; filename="Invoice_${billing.bill_number}.pdf"`);
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.send(pdfBuffer);
   } catch (error) {
     next(error);
@@ -272,28 +283,36 @@ async function downloadPassPdfByToken(req, res, next) {
     }
 
     const billing = billings[0];
-    const passes = await query('SELECT * FROM passes WHERE billing_id = ? ORDER BY id ASC LIMIT 1', [billing.id]);
+    const passes = await query('SELECT * FROM passes WHERE billing_id = ? ORDER BY id ASC', [billing.id]);
     const events = await query('SELECT * FROM events WHERE id = ?', [billing.event_id]);
     const categories = await query('SELECT * FROM pass_categories WHERE id = ?', [billing.category_id]);
     const styles = billing.style_id ? await query('SELECT * FROM pass_styles WHERE id = ?', [billing.style_id]) : [];
 
-    const pass = passes[0] || { code: 'PASS2026' };
     const event = events[0] || {};
     const category = categories[0] || {};
-    const style = styles[0] || null;
+    let style = styles[0] || null;
+    if (!style) {
+      const defaultStyles = await query(
+        'SELECT * FROM pass_styles WHERE (event_id = ? OR event_id IS NULL) ORDER BY is_default DESC, id ASC LIMIT 1',
+        [billing.event_id]
+      );
+      if (defaultStyles && defaultStyles.length > 0) style = defaultStyles[0];
+    }
 
-    const pdfBuffer = await generatePassPdf({
+    const pdfBuffer = await generateMultiPassPdf({
       style,
-      pass,
+      passes: passes.length > 0 ? passes : [{ code: 'PASS2026' }],
       event,
       category,
       customer: { name: billing.customer_name, email: billing.customer_email, phone: billing.customer_phone },
       sponsor: billing.sponsor_name
     });
 
+    const filename = passes.length > 1 ? `Passes_${billing.bill_number}.pdf` : `Pass_${passes[0]?.code || 'PASS'}.pdf`;
+
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="Pass_${pass.code}.pdf"`);
-    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.send(pdfBuffer);
   } catch (error) {
     next(error);
@@ -336,8 +355,164 @@ async function downloadBillPdfByToken(req, res, next) {
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="Invoice_${billing.bill_number}.pdf"`);
-    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.send(pdfBuffer);
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Resend / Retry delivery for an existing billing record without recreating passes
+ */
+async function resendBillingDelivery(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { sendVia = 'EMAIL', recipientEmail, recipientPhone, emailSubject } = req.body;
+
+    const billings = await query('SELECT * FROM billings WHERE id = ?', [id]);
+    if (!billings || billings.length === 0) {
+      return res.status(404).json({ success: false, message: 'Billing record not found' });
+    }
+    const billing = billings[0];
+
+    const passes = await query('SELECT * FROM passes WHERE billing_id = ? ORDER BY id ASC', [id]);
+    if (!passes || passes.length === 0) {
+      return res.status(404).json({ success: false, message: 'No passes associated with this billing' });
+    }
+
+    const events = await query('SELECT * FROM events WHERE id = ?', [billing.event_id]);
+    const categories = await query('SELECT * FROM pass_categories WHERE id = ?', [billing.category_id]);
+    const styles = billing.style_id ? await query('SELECT * FROM pass_styles WHERE id = ?', [billing.style_id]) : [];
+
+    const event = events[0] || {};
+    const category = categories[0] || {};
+    let style = styles[0] || null;
+    if (!style) {
+      const defaultStyles = await query(
+        'SELECT * FROM pass_styles WHERE (event_id = ? OR event_id IS NULL) ORDER BY is_default DESC, id ASC LIMIT 1',
+        [billing.event_id]
+      );
+      if (defaultStyles && defaultStyles.length > 0) style = defaultStyles[0];
+    }
+
+    const targetEmail = recipientEmail || billing.customer_email;
+    const targetPhone = recipientPhone || billing.customer_phone;
+
+    // 1. Generate individual pass PDFs
+    const passPdfs = await Promise.all(
+      passes.map(async (pass) => {
+        const buffer = await generatePassPdf({
+          style,
+          pass,
+          event,
+          category,
+          customer: { name: billing.customer_name, email: targetEmail, phone: targetPhone },
+          sponsor: billing.sponsor_name
+        });
+        return {
+          pass,
+          code: pass.code,
+          filename: `Pass_${pass.code}.pdf`,
+          buffer
+        };
+      })
+    );
+
+    // 2. Multi-Pass merged PDF
+    const multiPassPdfBuffer = await generateMultiPassPdf({
+      style,
+      passes,
+      event,
+      category,
+      customer: { name: billing.customer_name, email: targetEmail, phone: targetPhone },
+      sponsor: billing.sponsor_name
+    });
+
+    // 3. Bill PDF
+    const billPdfBuffer = await generateBillPdf({
+      billing,
+      event,
+      category,
+      passes
+    });
+
+    let emailDelivery = { success: false, status: 'NOT_REQUESTED' };
+    if ((sendVia === 'EMAIL' || sendVia === 'BOTH') && targetEmail) {
+      const subject = emailSubject || `${event.event_name} — Pass & Invoice Confirmation (${billing.bill_number})`;
+      const emailHtml = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1E293B; line-height: 1.6;">
+          <div style="background-color: #0F172A; padding: 24px; text-align: center; border-radius: 8px 8px 0 0;">
+            <h1 style="color: #FFFFFF; margin: 0; font-size: 22px;">${event.event_name}</h1>
+            <p style="color: #94A3B8; margin: 6px 0 0 0; font-size: 13px;">Official Pass Delivery & Invoice</p>
+          </div>
+          <div style="padding: 24px; border: 1px solid #E2E8F0; border-top: none; background-color: #FFFFFF; border-radius: 0 0 8px 8px;">
+            <p>Dear <strong>${billing.customer_name}</strong>,</p>
+            <p>Here are your official pass(es) and itemized tax invoice for <strong>${event.event_name}</strong>.</p>
+            
+            <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 16px; margin: 20px 0;">
+              <table style="width: 100%; font-size: 13.5px;">
+                <tr><td style="color: #64748B;">Category:</td><td><strong>${category.name}</strong></td></tr>
+                <tr><td style="color: #64748B;">Pass Code(s):</td><td style="font-family: monospace; font-weight: bold; color: #2563EB;">${passes.map(p => p.code).join(', ')}</td></tr>
+                <tr><td style="color: #64748B;">Quantity:</td><td><strong>${passes.length} pass(es)</strong></td></tr>
+                <tr><td style="color: #64748B;">Total Amount:</td><td><strong style="color: #047857;">₹${parseFloat(billing.total_amount).toFixed(2)}</strong></td></tr>
+              </table>
+            </div>
+
+            <p style="font-size: 13px; color: #64748B;">
+              <strong>Important:</strong> Please download and present the attached Pass PDF(s) with scannable barcodes at the entrance gate.
+            </p>
+          </div>
+        </div>
+      `;
+
+      const passAttachments = passPdfs.map(item => ({
+        filename: item.filename,
+        content: item.buffer,
+        contentType: 'application/pdf'
+      }));
+
+      emailDelivery = await eventDeliveryService.sendEventEmail({
+        eventId: billing.event_id,
+        billingId: billing.id,
+        to: targetEmail,
+        subject,
+        html: emailHtml,
+        attachments: [
+          ...passAttachments,
+          {
+            filename: `Invoice_${billing.bill_number}.pdf`,
+            content: billPdfBuffer,
+            contentType: 'application/pdf'
+          }
+        ]
+      });
+    }
+
+    let whatsappDelivery = { success: false, status: 'NOT_REQUESTED' };
+    if (sendVia === 'WHATSAPP' || sendVia === 'BOTH') {
+      whatsappDelivery = await eventDeliveryService.generateEventWhatsappDelivery({
+        eventId: billing.event_id,
+        customerPhone: targetPhone,
+        customerName: billing.customer_name,
+        eventName: event.event_name,
+        passCodes: passes.map(p => p.code),
+        totalAmount: billing.total_amount,
+        billingId: billing.id,
+        downloadToken: billing.download_token,
+        baseUrl: req.protocol + '://' + req.get('host'),
+        passPdfBuffer: multiPassPdfBuffer,
+        billPdfBuffer
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Delivery retry processed successfully',
+      emailDelivery,
+      whatsappDelivery,
+      whatsappUrl: whatsappDelivery.whatsappUrl || null
+    });
   } catch (error) {
     next(error);
   }
@@ -350,5 +525,6 @@ module.exports = {
   downloadPassPdf: downloadPassPdfByToken,
   downloadBillPdf: downloadBillPdfByToken,
   downloadPassPdfByToken,
-  downloadBillPdfByToken
+  downloadBillPdfByToken,
+  resendBillingDelivery
 };

@@ -2,8 +2,8 @@
  * Time and Timezone Utility for EventGen
  * 
  * Standardized on Indian Standard Time (IST - Asia/Kolkata, UTC+5:30)
- * All database timestamps remain UTC, while all display formatting and cycle calculations
- * are strictly performed in IST.
+ * All database timestamps remain stored in UTC / standard format, while all display formatting,
+ * range filtering, and cycle calculations are strictly performed in IST.
  */
 
 const IST_TIMEZONE = 'Asia/Kolkata';
@@ -12,7 +12,7 @@ const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 mins in ms
 /**
  * Convert an IST date input (string or Date) to UTC Date object.
  * If input already has a timezone indicator (Z or +/-offset), it parses it directly.
- * If input is a local IST string (e.g. "2026-09-02T10:00" or "2026-09-02 10:00:00"),
+ * If input is a local IST string (e.g. "2026-09-02T10:00" or "2026-09-02 10:00:00" or "2026-09-02"),
  * it interprets it as IST and shifts it to UTC.
  */
 function istToUTC(dateInput) {
@@ -28,7 +28,7 @@ function istToUTC(dateInput) {
       return new Date(trimmed);
     }
 
-    // Match YYYY-MM-DDTHH:mm, YYYY-MM-DD HH:mm:ss, etc.
+    // Match YYYY-MM-DDTHH:mm, YYYY-MM-DD HH:mm:ss, YYYY-MM-DD, etc.
     const match = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
     if (match) {
       const year = parseInt(match[1], 10);
@@ -54,11 +54,12 @@ function parseDate(dateInput) {
   if (dateInput instanceof Date) return new Date(dateInput.getTime());
   
   if (typeof dateInput === 'string') {
-    // If format is 'YYYY-MM-DD HH:mm:ss' (MySQL default string without timezone indicator, which is stored in UTC)
-    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(dateInput)) {
-      return new Date(dateInput.replace(' ', 'T') + 'Z');
+    const trimmed = dateInput.trim();
+    // If format is 'YYYY-MM-DD HH:mm:ss' (MySQL default string without timezone indicator, stored in UTC)
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(trimmed)) {
+      return new Date(trimmed.replace(' ', 'T') + 'Z');
     }
-    return new Date(dateInput);
+    return new Date(trimmed);
   }
   return new Date(dateInput);
 }
@@ -69,7 +70,6 @@ function parseDate(dateInput) {
 function getISTComponents(dateInput = new Date()) {
   const d = parseDate(dateInput);
   
-  // Format using Intl to guarantee precise timezone mapping
   const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone: IST_TIMEZONE,
     year: 'numeric',
@@ -100,43 +100,170 @@ function getISTComponents(dateInput = new Date()) {
 }
 
 /**
- * Format a Date to IST Date & Time string (e.g. "2 Oct 2026, 08:30 PM IST")
+ * Get IST calendar day boundary in UTC MySQL formatted string
+ * For example, if IST date is "2026-09-05", 
+ * start is 2026-09-05 00:00:00 IST -> 2026-09-04 18:30:00 UTC
+ * end is 2026-09-05 23:59:59 IST -> 2026-09-05 18:29:59 UTC
+ */
+function getISTDayBoundsUTC(dateStr = null) {
+  let year, month, day;
+  
+  if (dateStr) {
+    const cleanStr = String(dateStr).trim().slice(0, 10);
+    const parts = cleanStr.split('-');
+    year = parseInt(parts[0], 10);
+    month = parseInt(parts[1], 10);
+    day = parseInt(parts[2], 10);
+  } else {
+    const ist = getISTComponents(new Date());
+    year = ist.year;
+    month = ist.month;
+    day = ist.day;
+  }
+
+  const startUtcMs = Date.UTC(year, month - 1, day, 0, 0, 0) - IST_OFFSET_MS;
+  const endUtcMs = Date.UTC(year, month - 1, day, 23, 59, 59) - IST_OFFSET_MS;
+
+  const startDate = new Date(startUtcMs);
+  const endDate = new Date(endUtcMs);
+
+  return {
+    startUtc: formatMySqlDateTime(startDate),
+    endUtc: formatMySqlDateTime(endDate),
+    startDate,
+    endDate
+  };
+}
+
+/**
+ * Convert arbitrary IST date range strings (dateFrom, dateTo) to UTC SQL string boundaries
+ */
+function getISTDateRangeBoundsUTC(dateFrom = null, dateTo = null) {
+  let startUtc = null;
+  let endUtc = null;
+
+  if (dateFrom) {
+    const cleanFrom = String(dateFrom).trim().slice(0, 10);
+    const [y, m, d] = cleanFrom.split('-').map(Number);
+    if (y && m && d) {
+      const utcMs = Date.UTC(y, m - 1, d, 0, 0, 0) - IST_OFFSET_MS;
+      startUtc = formatMySqlDateTime(new Date(utcMs));
+    }
+  }
+
+  if (dateTo) {
+    const cleanTo = String(dateTo).trim().slice(0, 10);
+    const [y, m, d] = cleanTo.split('-').map(Number);
+    if (y && m && d) {
+      const utcMs = Date.UTC(y, m - 1, d, 23, 59, 59) - IST_OFFSET_MS;
+      endUtc = formatMySqlDateTime(new Date(utcMs));
+    }
+  }
+
+  return { startUtc, endUtc };
+}
+
+/**
+ * Get UTC range bounds for quick IST date range presets
+ * Presets: 'today', 'yesterday', 'last_7_days', 'last_30_days', 'this_month', 'previous_month'
+ */
+function getISTPresetRangeUTC(preset = 'today', customFrom = null, customTo = null) {
+  const istNow = getISTComponents(new Date());
+  const nowMs = new Date().getTime();
+
+  if (preset === 'today') {
+    return getISTDayBoundsUTC();
+  }
+
+  if (preset === 'yesterday') {
+    const yesterdayDate = new Date(nowMs - 24 * 60 * 60 * 1000);
+    const istYest = getISTComponents(yesterdayDate);
+    const yestStr = `${istYest.year}-${String(istYest.month).padStart(2, '0')}-${String(istYest.day).padStart(2, '0')}`;
+    return getISTDayBoundsUTC(yestStr);
+  }
+
+  if (preset === 'last_7_days') {
+    const startMs = Date.UTC(istNow.year, istNow.month - 1, istNow.day, 0, 0, 0) - (6 * 24 * 60 * 60 * 1000) - IST_OFFSET_MS;
+    const endMs = Date.UTC(istNow.year, istNow.month - 1, istNow.day, 23, 59, 59) - IST_OFFSET_MS;
+    return {
+      startUtc: formatMySqlDateTime(new Date(startMs)),
+      endUtc: formatMySqlDateTime(new Date(endMs))
+    };
+  }
+
+  if (preset === 'last_30_days') {
+    const startMs = Date.UTC(istNow.year, istNow.month - 1, istNow.day, 0, 0, 0) - (29 * 24 * 60 * 60 * 1000) - IST_OFFSET_MS;
+    const endMs = Date.UTC(istNow.year, istNow.month - 1, istNow.day, 23, 59, 59) - IST_OFFSET_MS;
+    return {
+      startUtc: formatMySqlDateTime(new Date(startMs)),
+      endUtc: formatMySqlDateTime(new Date(endMs))
+    };
+  }
+
+  if (preset === 'this_month') {
+    const startMs = Date.UTC(istNow.year, istNow.month - 1, 1, 0, 0, 0) - IST_OFFSET_MS;
+    const endMs = Date.UTC(istNow.year, istNow.month - 1, istNow.day, 23, 59, 59) - IST_OFFSET_MS;
+    return {
+      startUtc: formatMySqlDateTime(new Date(startMs)),
+      endUtc: formatMySqlDateTime(new Date(endMs))
+    };
+  }
+
+  if (preset === 'previous_month') {
+    const prevYear = istNow.month === 1 ? istNow.year - 1 : istNow.year;
+    const prevMonth = istNow.month === 1 ? 12 : istNow.month - 1;
+    const lastDay = new Date(prevYear, prevMonth, 0).getDate();
+    const startMs = Date.UTC(prevYear, prevMonth - 1, 1, 0, 0, 0) - IST_OFFSET_MS;
+    const endMs = Date.UTC(prevYear, prevMonth - 1, lastDay, 23, 59, 59) - IST_OFFSET_MS;
+    return {
+      startUtc: formatMySqlDateTime(new Date(startMs)),
+      endUtc: formatMySqlDateTime(new Date(endMs))
+    };
+  }
+
+  // Custom range
+  return getISTDateRangeBoundsUTC(customFrom, customTo);
+}
+
+/**
+ * Format a Date to IST Date & Time string (e.g. "04 Sep 2026, 10:50 PM")
  */
 function formatDateTimeIST(dateInput) {
   if (!dateInput) return '—';
   const d = parseDate(dateInput);
+  if (!d || isNaN(d.getTime())) return '—';
   const formatted = d.toLocaleString('en-GB', {
     timeZone: IST_TIMEZONE,
-    day: 'numeric',
+    day: '2-digit',
     month: 'short',
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
     hour12: true
   });
-  // Normalize am/pm to AM/PM
-  return formatted.replace(/\b(am|pm)\b/gi, (m) => m.toUpperCase()) + ' IST';
+  return formatted.replace(/\b(am|pm)\b/gi, (m) => m.toUpperCase());
 }
 
 /**
- * Format a Date to IST Date only string (e.g. "2 Oct 2026")
+ * Format a Date to IST Date only string (e.g. "04 Sep 2026")
  */
 function formatDateIST(dateInput) {
   if (!dateInput) return '—';
   const d = parseDate(dateInput);
+  if (!d || isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('en-GB', {
     timeZone: IST_TIMEZONE,
-    day: 'numeric',
+    day: '2-digit',
     month: 'short',
     year: 'numeric'
   });
 }
 
 /**
- * Format a time string or Date into 12-hour clock time (e.g. "01:00" -> "01:00 AM", "14:30" -> "02:30 PM")
+ * Format a time string or Date into 12-hour clock time (e.g. "10:50 PM")
  */
 function formatTimeIST(timeInput) {
-  if (!timeInput) return '01:00 AM';
+  if (!timeInput) return '—';
   
   if (typeof timeInput === 'string' && timeInput.includes(':') && timeInput.length <= 8) {
     const [hStr, mStr] = timeInput.split(':');
@@ -144,13 +271,14 @@ function formatTimeIST(timeInput) {
     const m = parseInt(mStr || '0', 10);
     const ampm = h >= 12 ? 'PM' : 'AM';
     h = h % 12;
-    h = h ? h : 12; // 0 becomes 12
+    h = h ? h : 12;
     const hFormatted = String(h).padStart(2, '0');
     const mFormatted = String(m).padStart(2, '0');
     return `${hFormatted}:${mFormatted} ${ampm}`;
   }
   
   const d = parseDate(timeInput);
+  if (!d || isNaN(d.getTime())) return '—';
   const formatted = d.toLocaleTimeString('en-US', {
     timeZone: IST_TIMEZONE,
     hour: '2-digit',
@@ -175,12 +303,6 @@ function checkValidityWindow(dateInput, validFrom, validUntil) {
 
 /**
  * Calculate dynamic renewal cycle for Mode B (Renewable) pass categories in IST
- * 
- * @param {Date|string} scanTimeInput - The current scan timestamp
- * @param {string} renewalTimeStr - Clock time in IST (e.g. "01:00", "06:00")
- * @param {Date|string} activeFrom - Renewal active from timestamp
- * @param {Date|string} activeUntil - Renewal active until timestamp
- * @returns {Object} { status: 'valid'|'future'|'expired', cycleStart: Date, nextUnlock: Date, renewalTimeFormatted: string }
  */
 function calculateRenewalCycle(scanTimeInput = new Date(), renewalTimeStr = '01:00', activeFrom = null, activeUntil = null) {
   const scanTime = parseDate(scanTimeInput);
@@ -210,8 +332,6 @@ function calculateRenewalCycle(scanTimeInput = new Date(), renewalTimeStr = '01:
   // 3. Extract IST date components of the current scan
   const ist = getISTComponents(scanTime);
   
-  // Create Date object representing today's renewal threshold in UTC
-  // Today's renewal threshold in IST occurs at year-month-day renHour:renMin IST (which is UTC - 5:30)
   const todayThresholdUtcMs = Date.UTC(ist.year, ist.month - 1, ist.day, renHour, renMin, 0) - IST_OFFSET_MS;
   const scanTimeUtcMs = scanTime.getTime();
 
@@ -219,13 +339,9 @@ function calculateRenewalCycle(scanTimeInput = new Date(), renewalTimeStr = '01:
   let nextUnlockUtcMs;
 
   if (scanTimeUtcMs < todayThresholdUtcMs) {
-    // Current scan is BEFORE today's renewal time (e.g. 00:30 before 01:00)
-    // The active cycle started YESTERDAY at renewal time, and unlocks TODAY at renewal time
     cycleStartUtcMs = todayThresholdUtcMs - (24 * 60 * 60 * 1000);
     nextUnlockUtcMs = todayThresholdUtcMs;
   } else {
-    // Current scan is ON or AFTER today's renewal time (e.g. 02:00 after 01:00)
-    // The active cycle started TODAY at renewal time, and unlocks TOMORROW at renewal time
     cycleStartUtcMs = todayThresholdUtcMs;
     nextUnlockUtcMs = todayThresholdUtcMs + (24 * 60 * 60 * 1000);
   }
@@ -248,10 +364,6 @@ function calculateRenewalCycle(scanTimeInput = new Date(), renewalTimeStr = '01:
 
 /**
  * Check whether a pass has already been scanned within the current active renewal cycle
- * 
- * @param {Date|string} lastScannedAt - Timestamp of the last scan
- * @param {Date} cycleStart - Start threshold Date of the current cycle
- * @returns {boolean}
  */
 function hasScannedInCurrentCycle(lastScannedAt, cycleStart) {
   if (!lastScannedAt) return false;
@@ -273,9 +385,13 @@ function formatMySqlDateTime(dateInput = new Date()) {
 
 module.exports = {
   IST_TIMEZONE,
+  IST_OFFSET_MS,
   istToUTC,
   parseDate,
   getISTComponents,
+  getISTDayBoundsUTC,
+  getISTDateRangeBoundsUTC,
+  getISTPresetRangeUTC,
   formatDateTimeIST,
   formatDateIST,
   formatTimeIST,

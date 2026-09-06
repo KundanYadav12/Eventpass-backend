@@ -17,6 +17,7 @@ const categoryController = require('../controllers/categoryController');
 const passStyleController = require('../controllers/passStyleController');
 const billingController = require('../controllers/billingController');
 const deliveryController = require('../controllers/deliveryController');
+const salesController = require('../controllers/salesController');
 const userController = require('../controllers/userController');
 const messageController = require('../controllers/messageController');
 const auditController = require('../controllers/auditController');
@@ -29,6 +30,7 @@ router.get('/health', (req, res) => {
     app: 'EventGen Backend API',
     port: process.env.PORT || 5006,
     multiEventEnabled: true,
+    timezone: 'Asia/Kolkata (IST, UTC+5:30)',
     time: new Date().toISOString()
   });
 });
@@ -54,9 +56,11 @@ router.put('/events/:id/status', authenticateToken, requireRole('SUPERADMIN'), e
 // 4. Dashboard Analytics
 router.get('/dashboard/stats', authenticateToken, scopeEventAccess, dashboardController.getDashboardStats);
 
-// 5. Pass Management Routes (Require 'passes.generate' permission)
+// 5. Pass Management Routes (Require 'passes.generate' or view permissions)
 router.get('/passes', authenticateToken, scopeEventAccess, passController.getPasses);
+router.get('/passes/export-excel', authenticateToken, scopeEventAccess, passController.exportPassesExcel);
 router.get('/passes/:id', authenticateToken, scopeEventAccess, passController.getPassById);
+router.post('/passes/:id/reshare', authenticateToken, scopeEventAccess, passController.resharePass);
 router.post('/passes/generate', authenticateToken, requirePermission('passes.generate'), scopeEventAccess, passController.generatePasses);
 router.post('/passes/:id/renew', authenticateToken, requireRole('SUPERADMIN'), passController.renewPass);
 router.post('/passes/bulk-renew', authenticateToken, requireRole('SUPERADMIN'), passController.bulkRenewPasses);
@@ -83,6 +87,7 @@ router.delete('/pass-styles/:id', authenticateToken, scopeEventAccess, requirePe
 // 9. Customer Billing & Pass Issuance Routes
 router.post('/billing/preview', authenticateToken, scopeEventAccess, requirePermission('billing.create'), billingController.previewBilling);
 router.post('/billing/issue-and-send', authenticateToken, scopeEventAccess, requirePermission('billing.create'), billingController.issuePassesAndBill);
+router.post('/billing/:id/resend-delivery', authenticateToken, scopeEventAccess, requirePermission('billing.create'), billingController.resendBillingDelivery);
 router.get('/billing/history', authenticateToken, scopeEventAccess, billingController.getBillingHistory);
 
 // Public Customer PDF Downloads (Secured by unguessable cryptographic token — no login needed)
@@ -93,7 +98,17 @@ router.get('/billing/download/bill/:token', billingController.downloadBillPdfByT
 router.get('/billing/:id/download-pass', billingController.downloadPassPdfByToken);
 router.get('/billing/:id/download-bill', billingController.downloadBillPdfByToken);
 
-// 10. Print Batch Management & TSC TE244 Hardware Routes (SuperAdmin Only)
+// 10. Sales Report Module Routes (Protected with RBAC 'sales.view' permission & event scoping)
+router.get('/sales/summary', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.getSalesSummary);
+router.get('/sales/transactions', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.getSalesTransactions);
+router.get('/sales/categories', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.getCategorySales);
+router.get('/sales/events', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.getEventSales);
+router.get('/sales/trend', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.getSalesTrend);
+router.get('/sales/payment-summary', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.getPaymentSummary);
+router.get('/sales/customers', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.getCustomerSales);
+router.get('/sales/export-excel', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.exportSalesExcel);
+
+// 11. Print Batch Management & TSC TE244 Hardware Routes (SuperAdmin Only)
 router.get('/print/batches', authenticateToken, scopeEventAccess, printController.getBatches);
 router.post('/print/batches', authenticateToken, requireRole('SUPERADMIN'), scopeEventAccess, printController.createBatch);
 router.get('/print/batches/:id', authenticateToken, printController.getBatchById);
@@ -118,7 +133,7 @@ router.post('/print/gateway/heartbeat', printController.gatewayHeartbeat);
 router.get('/print/gateway/pending', printController.gatewayPending);
 router.post('/print/gateway/jobs/:id/status', printController.gatewayJobStatus);
 
-// 11. User & RBAC Management (SuperAdmin only)
+// 12. User & RBAC Management (SuperAdmin only)
 router.get('/users', authenticateToken, scopeEventAccess, requireRole('SUPERADMIN'), userController.getUsers);
 router.get('/users/roles-permissions', authenticateToken, requireRole('SUPERADMIN'), userController.getRolesAndPermissions);
 router.put('/users/roles/:roleId/permissions', authenticateToken, requireRole('SUPERADMIN'), userController.updateRolePermissions);
@@ -127,14 +142,14 @@ router.put('/users/event-permissions', authenticateToken, requireRole('SUPERADMI
 router.post('/users', authenticateToken, scopeEventAccess, requireRole('SUPERADMIN'), userController.createUser);
 router.put('/users/:id', authenticateToken, scopeEventAccess, requireRole('SUPERADMIN'), userController.updateUser);
 
-// 12. Messages Configuration
+// 13. Messages Configuration
 router.get('/messages', authenticateToken, scopeEventAccess, messageController.getMessages);
 router.put('/messages/:key', authenticateToken, requireRole('SUPERADMIN'), messageController.updateMessage);
 
-// 13. Audit Logs
+// 14. Audit Logs
 router.get('/audit', authenticateToken, scopeEventAccess, requireRole('SUPERADMIN'), auditController.getAuditLogs);
 
-// 14. Event-Scoped Email & WhatsApp Delivery Routes
+// 15. Event-Scoped Email & WhatsApp Delivery Routes
 router.get('/events/:eventId/delivery/email', authenticateToken, scopeEventAccess, deliveryController.getEmailSettings);
 router.put('/events/:eventId/delivery/email', authenticateToken, scopeEventAccess, deliveryController.updateEmailSettings);
 router.post('/events/:eventId/delivery/email/test', authenticateToken, scopeEventAccess, deliveryController.testEmail);

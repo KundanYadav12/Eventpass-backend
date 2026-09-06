@@ -53,16 +53,26 @@ async function testEmail(req, res, next) {
         details: result
       });
     } else {
+      let friendlyError = result.error || result.message;
+      if (friendlyError && friendlyError.includes('535-5.7.8') || friendlyError.includes('BadCredentials')) {
+        friendlyError = 'Gmail SMTP Authentication Failed (535): You must use a 16-character Google App Password (not your regular Gmail login password). Go to your Google Account > Security > 2-Step Verification > App passwords, generate a password for "Mail", and paste it here.';
+      }
+
       res.status(400).json({
         success: false,
-        message: `❌ Failed to send test email: ${result.error || result.message}`,
+        message: `❌ Failed to send test email: ${friendlyError}`,
         details: result
       });
     }
   } catch (err) {
+    let friendlyError = err.message;
+    if (friendlyError && (friendlyError.includes('535-5.7.8') || friendlyError.includes('BadCredentials'))) {
+      friendlyError = 'Gmail SMTP Authentication Failed (535): You must use a 16-character Google App Password (not your regular Gmail login password). Go to your Google Account > Security > 2-Step Verification > App passwords, generate a password for "Mail", and paste it here.';
+    }
+
     res.status(400).json({
       success: false,
-      message: `❌ Failed to send test email: ${err.message}`
+      message: `❌ Failed to send test email: ${friendlyError}`
     });
   }
 }

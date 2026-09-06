@@ -69,9 +69,18 @@ async function saveEventEmailSettings(eventId, data) {
     is_enabled
   } = data;
 
-  const cleanUser = (smtp_user || sender_email || '').trim();
+  let cleanHost = (smtp_host || '').trim();
+  let cleanUser = (smtp_user || sender_email || '').trim();
   const cleanPass = (smtp_pass || '').replace(/\s+/g, '');
-  const cleanHost = (smtp_host || 'smtp.gmail.com').trim();
+
+  // Auto-normalize if user typed an email address into smtp_host or if host contains gmail
+  if (!cleanHost || cleanHost.includes('@') || cleanHost.toLowerCase().includes('gmail')) {
+    cleanHost = 'smtp.gmail.com';
+  }
+  if (!cleanUser || !cleanUser.includes('@')) {
+    cleanUser = (sender_email || '').trim();
+  }
+
   const isGmail = cleanHost.toLowerCase().includes('gmail');
   const portNum = parseInt(smtp_port || (isGmail ? '465' : '587'), 10);
   const isSecure = portNum === 465 || Boolean(smtp_secure);
@@ -191,10 +200,18 @@ async function getEventWhatsappSettings(eventId, { internal = false } = {}) {
  * Save event-specific WhatsApp settings
  */
 async function saveEventWhatsappSettings(eventId, data) {
-  const { provider, phone_number_id, access_token, custom_message_template, is_enabled } = data;
+  const {
+    provider,
+    phone_number_id,
+    access_token,
+    custom_message_template,
+    is_enabled
+  } = data;
 
-  if (access_token && access_token !== '••••••••') {
-    const enc = encryptSecret(access_token);
+  const cleanToken = (access_token || '').trim();
+
+  if (cleanToken && cleanToken !== '••••••••') {
+    const enc = encryptSecret(cleanToken);
     await query(
       `INSERT INTO event_whatsapp_settings
          (event_id, provider, phone_number_id, custom_message_template, is_enabled, access_token_encrypted, access_token_iv, access_token_auth_tag)
@@ -247,11 +264,15 @@ async function saveEventWhatsappSettings(eventId, data) {
  * Create dynamic event-scoped Nodemailer transporter
  */
 function createEventTransporter(settings) {
-  const host = (settings.smtp_host || 'smtp.gmail.com').trim().toLowerCase();
-  const user = (settings.smtp_user || settings.sender_email || '').trim();
+  let host = (settings.smtp_host || 'smtp.gmail.com').trim().toLowerCase();
+  let user = (settings.smtp_user || settings.sender_email || '').trim();
   const pass = (settings.smtp_pass || '').replace(/\s+/g, '');
 
-  if (host.includes('gmail')) {
+  // Auto-normalize if user typed an email into smtp_host or if it's Gmail
+  if (host.includes('@') || host.includes('gmail') || user.includes('@gmail.com') || (settings.sender_email && settings.sender_email.includes('@gmail.com'))) {
+    if (!user.includes('@')) {
+      user = (settings.sender_email || '').trim();
+    }
     return nodemailer.createTransport({
       service: 'gmail',
       auth: {

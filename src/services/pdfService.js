@@ -30,9 +30,10 @@ async function generateBarcodeBuffer(text, { width = 200, height = 60 } = {}) {
  * Generate a QR Code PNG Buffer
  */
 async function generateQrBuffer(text, { width = 150 } = {}) {
+  const pixelWidth = Math.max(300, Math.round(width * 3));
   return QRCode.toBuffer(String(text).toUpperCase(), {
     type: 'png',
-    width: width * 2,
+    width: pixelWidth,
     margin: 1,
     color: {
       dark: '#000000',
@@ -42,11 +43,225 @@ async function generateQrBuffer(text, { width = 150 } = {}) {
 }
 
 /**
- * Generate Pass PDF based on configured Pass Style layout
+ * Normalize barcode format string into 'QR' or 'CODE128'
+ */
+function normalizeBarcodeFormat(format) {
+  if (!format) return null;
+  const str = String(format).trim().toUpperCase().replace(/[-_ ]/g, '');
+  if (str === 'QR' || str === 'QRCODE' || str === 'QR_CODE') {
+    return 'QR';
+  }
+  if (str === 'CODE128' || str === 'BARCODE' || str === 'C128' || str === '128') {
+    return 'CODE128';
+  }
+  return null;
+}
+
+/**
+ * Resolves whether an element or style should render as QR Code ('QR') or Code 128 ('CODE128').
+ */
+function resolveBarcodeFormat(el = {}, style = {}, event = {}) {
+  // 1. Explicit element format field
+  const elFormat = el.barcodeFormat || el.barcode_format || el.barcodeType || el.barcode_type || el.format;
+  if (elFormat) {
+    const norm = normalizeBarcodeFormat(elFormat);
+    if (norm) return norm;
+  }
+
+  // 2. Element type
+  if (el.type) {
+    const norm = normalizeBarcodeFormat(el.type);
+    if (norm) return norm;
+  }
+
+  // 3. Element field if explicitly QR
+  if (el.field) {
+    const norm = normalizeBarcodeFormat(el.field);
+    if (norm === 'QR') return 'QR';
+  }
+
+  // 4. Style-level configuration
+  const styleFormat = style?.barcode_format || style?.barcodeFormat || style?.barcode_type || style?.barcodeType;
+  if (styleFormat) {
+    const norm = normalizeBarcodeFormat(styleFormat);
+    if (norm) return norm;
+  }
+
+  // 5. Event-level configuration fallback
+  const eventFormat = event?.barcode_type || event?.barcodeType;
+  if (eventFormat) {
+    const norm = normalizeBarcodeFormat(eventFormat);
+    if (norm) return norm;
+  }
+
+  // Default fallback: CODE128
+  return 'CODE128';
+}
+
+/**
+ * Render a single pass page onto an existing PDFDocument
+ */
+async function renderPassOnDocument(doc, {
+  style,
+  pass,
+  event = {},
+  category = {},
+  customer = {},
+  sponsor = '',
+  pdfWidth,
+  pdfHeight,
+  scale,
+  canvasWidth,
+  canvasHeight,
+  isNewPage = false
+}) {
+  if (isNewPage) {
+    doc.addPage({
+      size: [pdfWidth, pdfHeight],
+      margins: { top: 0, bottom: 0, left: 0, right: 0 }
+    });
+  }
+
+  // 1. Render Background
+  if (style?.background_image_url && style.background_image_url.startsWith('data:image')) {
+    try {
+      const base64Data = style.background_image_url.split(',')[1];
+      const imgBuffer = Buffer.from(base64Data, 'base64');
+      doc.image(imgBuffer, 0, 0, { width: pdfWidth, height: pdfHeight });
+    } catch (bgErr) {
+      console.warn('[PDF] Failed to render base64 background:', bgErr.message);
+      drawDefaultBackground(doc, pdfWidth, pdfHeight, category);
+    }
+  } else {
+    drawDefaultBackground(doc, pdfWidth, pdfHeight, category);
+  }
+
+  // 2. Elements to render
+  let elements = [];
+  if (style?.elements_config) {
+    elements = typeof style.elements_config === 'string'
+      ? JSON.parse(style.elements_config)
+      : style.elements_config;
+  }
+
+  // If no elements are configured, build a default layout
+  if (!Array.isArray(elements) || elements.length === 0) {
+    elements = getDefaultElementsConfig(canvasWidth, canvasHeight);
+  }
+
+  for (const el of elements) {
+    if (el.isVisible === false) continue;
+
+    const x = (el.x || 0) * scale;
+    const y = (el.y || 0) * scale;
+    const w = (el.width || 200) * scale;
+    const h = (el.height || 60) * scale;
+    const fontSize = Math.max(8, (el.fontSize || 18) * scale);
+    const color = el.fontColor || '#FFFFFF';
+    const align = el.textAlign || 'center';
+
+    // Check if barcode or QR code element
+    const isBarcodeElement =
+      el.type === 'barcode' ||
+      el.type === 'qrcode' ||
+      el.field === 'barcode' ||
+      el.field === 'qrcode' ||
+      el.id === 'el_barcode' ||
+      el.id === 'el_qrcode';
+
+    if (isBarcodeElement) {
+      const format = resolveBarcodeFormat(el, style, event);
+
+      if (format === 'QR') {
+        try {
+          let qrDim = Math.min(w, h);
+          if (h < w * 0.4 && h < 50) {
+            qrDim = w;
+          }
+          const qrX = x + (w > qrDim ? (w - qrDim) / 2 : 0);
+          const qrY = y + (h > qrDim ? (h - qrDim) / 2 : 0);
+          const qrPng = await generateQrBuffer(pass.code, { width: qrDim });
+          doc.image(qrPng, qrX, qrY, { width: qrDim, height: qrDim });
+        } catch (qErr) {
+          console.warn('[PDF] QR generation error:', qErr.message);
+        }
+      } else {
+        try {
+          const barcodePng = await generateBarcodeBuffer(pass.code, { width: w, height: h });
+          doc.image(barcodePng, x, y, { width: w, height: h });
+        } catch (bErr) {
+          console.warn('[PDF] Barcode generation error:', bErr.message);
+        }
+      }
+      continue;
+    }
+
+    // Text elements
+    let textValue = '';
+    switch (el.field) {
+      case 'event_name':
+        textValue = event.event_name || 'Event 2026';
+        break;
+      case 'category_name':
+        textValue = category.name || pass.code_type || 'VIP Pass';
+        break;
+      case 'customer_name':
+        textValue = customer.name || customer.customer_name || pass.customer_name || 'Pass Holder';
+        break;
+      case 'pass_code':
+        textValue = `CODE: ${pass.code}`;
+        break;
+      case 'validity':
+        textValue = category.valid_from && category.valid_until
+          ? `${formatDateIST(category.valid_from)} – ${formatDateIST(category.valid_until)}`
+          : 'Valid for Event Entry';
+        break;
+      case 'sponsor':
+        textValue = sponsor || pass.sponsor_name ? `SPONSORED BY ${sponsor || pass.sponsor_name}` : '';
+        break;
+      case 'price':
+        textValue = category.price !== undefined ? `₹${parseFloat(category.price).toFixed(2)}` : '';
+        break;
+      case 'custom':
+      default:
+        textValue = el.text || el.label || '';
+        break;
+    }
+
+    if (textValue) {
+      doc
+        .fontSize(fontSize)
+        .fillColor(color)
+        .text(textValue, x, y, {
+          width: w,
+          align: align,
+          lineBreak: true
+        });
+    }
+  }
+}
+
+/**
+ * Generate Single Pass PDF based on configured Pass Style layout
  */
 async function generatePassPdf({ style, pass, event = {}, category = {}, customer = {}, sponsor = '' }) {
+  return generateMultiPassPdf({
+    style,
+    passes: pass ? [pass] : [],
+    event,
+    category,
+    customer,
+    sponsor
+  });
+}
+
+/**
+ * Generate Multi-Pass PDF (1 page per pass) based on configured Pass Style layout
+ */
+async function generateMultiPassPdf({ style, passes = [], event = {}, category = {}, customer = {}, sponsor = '' }) {
   return new Promise(async (resolve, reject) => {
     try {
+      const passList = Array.isArray(passes) && passes.length > 0 ? passes : [{ code: 'PASS2026' }];
       const canvasWidth = style?.canvas_width || 800;
       const canvasHeight = style?.canvas_height || 1200;
 
@@ -57,114 +272,29 @@ async function generatePassPdf({ style, pass, event = {}, category = {}, custome
 
       const doc = new PDFDocument({
         size: [pdfWidth, pdfHeight],
-        margins: { top: 0, bottom: 0, left: 0, right: 0 }
+        margins: { top: 0, bottom: 0, left: 0, right: 0 },
+        autoFirstPage: true
       });
 
       const buffers = [];
       doc.on('data', chunk => buffers.push(chunk));
       doc.on('end', () => resolve(Buffer.concat(buffers)));
 
-      // 1. Render Background
-      if (style?.background_image_url && style.background_image_url.startsWith('data:image')) {
-        try {
-          const base64Data = style.background_image_url.split(',')[1];
-          const imgBuffer = Buffer.from(base64Data, 'base64');
-          doc.image(imgBuffer, 0, 0, { width: pdfWidth, height: pdfHeight });
-        } catch (bgErr) {
-          console.warn('[PDF] Failed to render base64 background:', bgErr.message);
-          drawDefaultBackground(doc, pdfWidth, pdfHeight, category);
-        }
-      } else {
-        drawDefaultBackground(doc, pdfWidth, pdfHeight, category);
-      }
-
-      // 2. Elements to render
-      let elements = [];
-      if (style?.elements_config) {
-        elements = typeof style.elements_config === 'string'
-          ? JSON.parse(style.elements_config)
-          : style.elements_config;
-      }
-
-      // If no elements are configured, build a default layout
-      if (!Array.isArray(elements) || elements.length === 0) {
-        elements = getDefaultElementsConfig(canvasWidth, canvasHeight);
-      }
-
-      for (const el of elements) {
-        if (el.isVisible === false) continue;
-
-        const x = (el.x || 0) * scale;
-        const y = (el.y || 0) * scale;
-        const w = (el.width || 200) * scale;
-        const h = (el.height || 60) * scale;
-        const fontSize = Math.max(8, (el.fontSize || 18) * scale);
-        const color = el.fontColor || '#FFFFFF';
-        const align = el.textAlign || 'center';
-
-        // Check if barcode or QR code
-        if (el.type === 'barcode' || el.field === 'barcode') {
-          try {
-            const barcodePng = await generateBarcodeBuffer(pass.code, { width: w, height: h });
-            doc.image(barcodePng, x, y, { width: w, height: h });
-          } catch (bErr) {
-            console.warn('[PDF] Barcode generation error:', bErr.message);
-          }
-          continue;
-        }
-
-        if (el.type === 'qrcode' || el.field === 'qrcode') {
-          try {
-            const qrPng = await generateQrBuffer(pass.code, { width: w });
-            doc.image(qrPng, x, y, { width: w, height: w });
-          } catch (qErr) {
-            console.warn('[PDF] QR generation error:', qErr.message);
-          }
-          continue;
-        }
-
-        // Text elements
-        let textValue = '';
-        switch (el.field) {
-          case 'event_name':
-            textValue = event.event_name || 'Event 2026';
-            break;
-          case 'category_name':
-            textValue = category.name || pass.code_type || 'VIP Pass';
-            break;
-          case 'customer_name':
-            textValue = customer.name || customer.customer_name || pass.customer_name || 'Pass Holder';
-            break;
-          case 'pass_code':
-            textValue = `CODE: ${pass.code}`;
-            break;
-          case 'validity':
-            textValue = category.valid_from && category.valid_until
-              ? `${formatDateIST(category.valid_from)} – ${formatDateIST(category.valid_until)}`
-              : 'Valid for Event Entry';
-            break;
-          case 'sponsor':
-            textValue = sponsor || pass.sponsor_name ? `SPONSORED BY ${sponsor || pass.sponsor_name}` : '';
-            break;
-          case 'price':
-            textValue = category.price !== undefined ? `₹${parseFloat(category.price).toFixed(2)}` : '';
-            break;
-          case 'custom':
-          default:
-            textValue = el.text || el.label || '';
-            break;
-        }
-
-        if (textValue) {
-          doc
-            .fontSize(fontSize)
-            .fillColor(color)
-            .text(textValue, x, y, {
-              width: w,
-              align: align,
-              lineBreak: true
-            });
-        }
+      for (let i = 0; i < passList.length; i++) {
+        await renderPassOnDocument(doc, {
+          style,
+          pass: passList[i],
+          event,
+          category,
+          customer,
+          sponsor,
+          pdfWidth,
+          pdfHeight,
+          scale,
+          canvasWidth,
+          canvasHeight,
+          isNewPage: i > 0
+        });
       }
 
       doc.end();
@@ -454,5 +584,8 @@ module.exports = {
   generateBarcodeBuffer,
   generateQrBuffer,
   generatePassPdf,
-  generateBillPdf
+  generateMultiPassPdf,
+  generateBillPdf,
+  normalizeBarcodeFormat,
+  resolveBarcodeFormat
 };

@@ -1,14 +1,15 @@
 const { query } = require('../config/db');
+const { getISTDayBoundsUTC } = require('../utils/timeUtil');
 
 async function getDashboardStats(req, res, next) {
   try {
     const eventId = req.effectiveEventId || req.query.eventId;
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
-    const todayStart = new Date().toISOString().slice(0, 10) + ' 00:00:00';
-    const todayEnd = new Date().toISOString().slice(0, 10) + ' 23:59:59';
+    
+    // Strict IST Calendar Day bounds converted to UTC SQL strings
+    const { startUtc: todayStart, endUtc: todayEnd } = getISTDayBoundsUTC();
 
     const eventWhere = eventId ? 'WHERE event_id = ?' : '';
-    const eventWhereP = eventId ? 'WHERE p.event_id = ?' : '';
     const eventWhereSh = eventId ? 'AND sh.event_id = ?' : '';
     const eventParams = eventId ? [parseInt(eventId, 10)] : [];
 
@@ -41,7 +42,7 @@ async function getDashboardStats(req, res, next) {
       ORDER BY c.id ASC
     `, eventParams);
 
-    // Today's scan statistics
+    // Today's scan statistics (based on IST day boundaries)
     const [todayStats] = await query(`
       SELECT
         COUNT(*) as total_scans_today,

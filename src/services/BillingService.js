@@ -1,7 +1,7 @@
 const { query, withTransaction } = require('../config/db');
 const { generatePassCode, generateHmacSignature, generateSecureToken } = require('../utils/cryptoUtil');
 const { logAudit } = require('./AuditService');
-const { generatePassPdf, generateBillPdf } = require('./pdfService');
+const { generatePassPdf, generateMultiPassPdf, generateBillPdf } = require('./pdfService');
 const eventDeliveryService = require('./eventDeliveryService');
 const { formatDateTimeIST, formatDateIST } = require('../utils/timeUtil');
 
@@ -48,7 +48,7 @@ function calculateGst({ unitPrice, quantity = 1, gstMode = 'INCLUDED', gstRate =
 }
 
 /**
- * Issue passes for customer, generate Bill and Pass PDFs, and optionally dispatch via Email / WhatsApp
+ * Issue passes for customer, generate Bill and Pass PDFs, and dispatch via Email / WhatsApp
  */
 async function issuePassesAndBill({
   eventId,
@@ -110,6 +110,8 @@ async function issuePassesAndBill({
     gstRate
   });
 
+  const isShared = sendVia && sendVia !== 'NONE';
+
   // 2. Perform Transactional Pass & Bill Creation
   const result = await withTransaction(async (conn) => {
     // Generate Invoice Number e.g. INV-2026-1001
@@ -160,8 +162,10 @@ async function issuePassesAndBill({
         `INSERT INTO passes (
           event_id, category_id, code, code_type, category_prefix, hmac_sig,
           status, valid_from, valid_until, printed, billing_id, style_id,
-          customer_name, customer_email, customer_phone, sponsor_name, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, false, ?, ?, ?, ?, ?, ?, NOW())`,
+          customer_name, customer_email, customer_phone, sponsor_name,
+          sharing_method, first_shared_at, last_shared_at, reshare_count, shared_by,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, false, ?, ?, ?, ?, ?, ?, ?, IF(? = 1, NOW(), NULL), IF(? = 1, NOW(), NULL), 0, ?, NOW())`,
         [
           eventId,
           categoryId,
@@ -176,12 +180,39 @@ async function issuePassesAndBill({
           customerName.trim(),
           customerEmail ? customerEmail.trim().toLowerCase() : null,
           customerPhone ? customerPhone.trim() : null,
-          sponsorName ? sponsorName.trim() : null
+          sponsorName ? sponsorName.trim() : null,
+          sendVia,
+          isShared ? 1 : 0,
+          isShared ? 1 : 0,
+          userId
         ]
       );
 
+      const passId = passRes.insertId;
+
+      // Track initial communication history if pass was shared
+      if (isShared) {
+        await conn.query(
+          `INSERT INTO pass_communication_history (
+            pass_id, event_id, billing_id, customer_name, customer_email, customer_phone,
+            sharing_method, status, shared_by, shared_by_name, notes, shared_at, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SENT', ?, ?, 'Initial issue and customer dispatch', NOW(), NOW())`,
+          [
+            passId,
+            eventId,
+            billingId,
+            customerName.trim(),
+            customerEmail ? customerEmail.trim().toLowerCase() : null,
+            customerPhone ? customerPhone.trim() : null,
+            sendVia,
+            userId,
+            userName || 'Admin'
+          ]
+        );
+      }
+
       createdPasses.push({
-        id: passRes.insertId,
+        id: passId,
         code,
         hmac_sig: hmac,
         category_name: category.name,
@@ -207,6 +238,7 @@ async function issuePassesAndBill({
           customerName,
           quantity: calc.quantity,
           totalAmount: calc.totalAmount,
+          sharingMethod: sendVia,
           passCodes: createdPasses.map(p => p.code)
         }),
         ipAddress,
@@ -241,10 +273,30 @@ async function issuePassesAndBill({
     created_at: new Date()
   };
 
-  // Generate First Pass PDF (or primary pass)
-  const passPdfBuffer = await generatePassPdf({
+  // Generate all individual Pass PDFs (1:1 mapping for all N passes)
+  const passPdfs = await Promise.all(
+    result.createdPasses.map(async (pass) => {
+      const buffer = await generatePassPdf({
+        style,
+        pass,
+        event,
+        category,
+        customer: { name: customerName, email: customerEmail, phone: customerPhone },
+        sponsor: sponsorName
+      });
+      return {
+        pass,
+        code: pass.code,
+        filename: `Pass_${pass.code}.pdf`,
+        buffer
+      };
+    })
+  );
+
+  // Generate Multi-Pass Merged PDF (bundle for all N passes)
+  const multiPassPdfBuffer = await generateMultiPassPdf({
     style,
-    pass: result.createdPasses[0],
+    passes: result.createdPasses,
     event,
     category,
     customer: { name: customerName, email: customerEmail, phone: customerPhone },
@@ -259,7 +311,7 @@ async function issuePassesAndBill({
     passes: result.createdPasses
   });
 
-  // 4. Handle Email Dispatch if requested (Event-Scoped SMTP Delivery)
+  // 4. Handle Email Dispatch if requested (Event-Scoped SMTP Delivery with ALL Pass PDFs)
   let emailDelivery = { success: false, status: 'NOT_REQUESTED' };
   if ((sendVia === 'EMAIL' || sendVia === 'BOTH') && customerEmail) {
     const subject = emailSubject || `${event.event_name} — Your Official Entry Pass & Invoice (${result.billNumber})`;
@@ -272,20 +324,20 @@ async function issuePassesAndBill({
         </div>
         <div style="padding: 24px; border: 1px solid #E2E8F0; border-top: none; background-color: #FFFFFF; border-radius: 0 0 8px 8px;">
           <p>Dear <strong>${customerName}</strong>,</p>
-          <p>Thank you for purchasing your pass for <strong>${event.event_name}</strong>! Your entry pass and itemized tax invoice are attached to this email.</p>
+          <p>Thank you for purchasing your pass for <strong>${event.event_name}</strong>! All <strong>${calc.quantity}</strong> entry pass(es) and your itemized tax invoice are attached to this email.</p>
           
           <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 16px; margin: 20px 0;">
             <table style="width: 100%; font-size: 13.5px;">
               <tr><td style="color: #64748B;">Category:</td><td><strong>${category.name}</strong></td></tr>
-              <tr><td style="color: #64748B;">Pass Code:</td><td style="font-family: monospace; font-weight: bold; color: #2563EB;">${result.createdPasses.map(p => p.code).join(', ')}</td></tr>
-              <tr><td style="color: #64748B;">Quantity:</td><td><strong>${calc.quantity}</strong></td></tr>
+              <tr><td style="color: #64748B;">Pass Code(s):</td><td style="font-family: monospace; font-weight: bold; color: #2563EB;">${result.createdPasses.map(p => p.code).join(', ')}</td></tr>
+              <tr><td style="color: #64748B;">Quantity:</td><td><strong>${calc.quantity} pass(es)</strong></td></tr>
               <tr><td style="color: #64748B;">Total Amount:</td><td><strong style="color: #047857;">₹${calc.totalAmount.toFixed(2)}</strong></td></tr>
               ${sponsorName ? `<tr><td style="color: #64748B;">Sponsor:</td><td>${sponsorName}</td></tr>` : ''}
             </table>
           </div>
 
           <p style="font-size: 13px; color: #64748B;">
-            <strong>Important:</strong> Please download and present the attached Pass PDF with its scannable barcode at the entrance gate for instant entry.
+            <strong>Important:</strong> Please download and present the attached Pass PDF(s) with scannable barcodes at the entrance gate for instant entry.
           </p>
 
           <hr style="border: none; border-top: 1px solid #E2E8F0; margin: 24px 0;" />
@@ -297,6 +349,13 @@ async function issuePassesAndBill({
       </div>
     `;
 
+    // Construct individual attachments for all N passes + 1 Invoice PDF
+    const passAttachments = passPdfs.map(item => ({
+      filename: item.filename,
+      content: item.buffer,
+      contentType: 'application/pdf'
+    }));
+
     emailDelivery = await eventDeliveryService.sendEventEmail({
       eventId,
       billingId: result.billingId,
@@ -304,11 +363,7 @@ async function issuePassesAndBill({
       subject,
       html: emailHtml,
       attachments: [
-        {
-          filename: `Pass_${result.createdPasses[0].code}.pdf`,
-          content: passPdfBuffer,
-          contentType: 'application/pdf'
-        },
+        ...passAttachments,
         {
           filename: `Invoice_${result.billNumber}.pdf`,
           content: billPdfBuffer,
@@ -331,7 +386,7 @@ async function issuePassesAndBill({
       billingId: result.billingId,
       downloadToken: result.downloadToken,
       baseUrl: baseUrl || null,
-      passPdfBuffer,
+      passPdfBuffer: multiPassPdfBuffer,
       billPdfBuffer
     });
   }
@@ -349,7 +404,12 @@ async function issuePassesAndBill({
     emailDelivery,
     whatsappUrl: whatsappDelivery.whatsappUrl || null,
     whatsappDelivery,
-    passPdfBase64: passPdfBuffer.toString('base64'),
+    passPdfBase64: multiPassPdfBuffer.toString('base64'),
+    passPdfs: passPdfs.map(p => ({
+      code: p.code,
+      filename: p.filename,
+      base64: p.buffer.toString('base64')
+    })),
     billPdfBase64: billPdfBuffer.toString('base64')
   };
 }
@@ -359,7 +419,7 @@ async function issuePassesAndBill({
  */
 async function getBillingHistory({ eventId = null, page = 1, limit = 20, search = '' }) {
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
-  const pageLimit = Math.min(100, Math.max(10, parseInt(limit, 10) || 20));
+  const pageLimit = Math.min(100, Math.max(5, parseInt(limit, 10) || 20));
   const offset = (pageNum - 1) * pageLimit;
 
   const whereConditions = [];
