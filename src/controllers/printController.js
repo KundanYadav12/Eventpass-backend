@@ -71,7 +71,7 @@ async function getBatchById(req, res, next) {
 async function processChunk(req, res, next) {
   try {
     const { id } = req.params;
-    const { chunkSize = 50, printerName = 'TSC TE244' } = req.body;
+    const { chunkSize = 50, printerName = 'TSC TE244', spoolOnServer = false } = req.body;
     const ipAddress = req.ip || req.connection.remoteAddress;
     const userAgent = req.headers['user-agent'];
 
@@ -79,7 +79,8 @@ async function processChunk(req, res, next) {
       userId: req.user?.id,
       userName: req.user?.name,
       ipAddress,
-      userAgent
+      userAgent,
+      spoolOnServer: Boolean(spoolOnServer)
     });
 
     res.json({

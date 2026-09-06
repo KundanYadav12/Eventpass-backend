@@ -317,7 +317,7 @@ async function getBatchDetails(batchId) {
 /**
  * Process chunk printing (marks passes printed and sends commands directly or to Gateway Queue)
  */
-async function processBatchChunk(batchId, chunkSize = 50, printerName = null, { userId, userName, ipAddress, userAgent } = {}) {
+async function processBatchChunk(batchId, chunkSize = 50, printerName = null, { userId, userName, ipAddress, userAgent, spoolOnServer = false } = {}) {
   const batchRows = await query('SELECT * FROM print_batches WHERE id = ?', [batchId]);
   if (!batchRows || batchRows.length === 0) throw new Error('Batch not found');
   const batch = batchRows[0];
@@ -327,8 +327,8 @@ async function processBatchChunk(batchId, chunkSize = 50, printerName = null, { 
   const activePrinter = printerName || settings.printer_name || DEFAULT_PRINTER_NAME;
   const generator = getCommandGenerator(settings.command_language);
 
-  // 2. If running locally (not in gateway mode), verify physical printer
-  if (!settings.gateway_mode) {
+  // 2. If running locally on server and server-side spooling is enabled, verify physical printer
+  if (!settings.gateway_mode && spoolOnServer) {
     const printerStatus = await getPrinterStatus(activePrinter);
     if (printerStatus.isOutOfStock) {
       await query(
