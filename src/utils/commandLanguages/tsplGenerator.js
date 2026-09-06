@@ -52,10 +52,10 @@ function buildLabelCommands(pass, xOffset = 0, options = {}) {
     lines.push(`TEXT ${xOffset + 92},235,"2",0,1,1,"PASS CODE:"`);
     lines.push(`TEXT ${xOffset + 96},270,"3",0,1,1,"${code}"`);
   } else {
-    // Clean centered QR Code + PASS CODE text ONLY
-    lines.push(`QRCODE ${xOffset + 62},40,L,6,A,0,"${qrData}"`);
-    lines.push(`TEXT ${xOffset + 92},250,"2",0,1,1,"PASS CODE:"`);
-    lines.push(`TEXT ${xOffset + 96},285,"3",0,1,1,"${code}"`);
+    // High-contrast, scannable QR Code centered with wide quiet zones
+    lines.push(`QRCODE ${xOffset + 89},35,M,6,A,0,"${qrData}"`);
+    lines.push(`TEXT ${xOffset + 92},235,"2",0,1,1,"PASS CODE:"`);
+    lines.push(`TEXT ${xOffset + 96},270,"3",0,1,1,"${code}"`);
   }
 
   // Outer Box
@@ -205,7 +205,7 @@ function generateSingleBarcode(barcodeValue = '55KDBD2', eventName = 'EVENTGEN 2
  * Generate Media Gap Calibration Command
  */
 function generateCalibration(options = {}) {
-  return 'GAP-DETECT\r\nFEED 1\r\n';
+  return 'AUTODETECT\r\nGAP-DETECT\r\nFEED 1\r\n';
 }
 
 /**
