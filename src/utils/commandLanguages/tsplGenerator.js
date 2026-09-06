@@ -37,28 +37,28 @@ function buildLabelCommands(pass, xOffset = 0, options = {}) {
   // Width in dots: 38mm = ~304 dots. Height in dots: 50mm = ~400 dots
   const labelWidthDots = Math.round(widthMm * 8);
   const labelHeightDots = Math.round(heightMm * 8);
-  const boxRight = xOffset + labelWidthDots - 10;
-  const boxBottom = labelHeightDots - 10;
+  const boxRight = xOffset + labelWidthDots - 8;
+  const boxBottom = labelHeightDots - 8;
 
   const lines = [];
   const upperPattern = String(pattern || pass.barcode_pattern || 'QR_CODE').toUpperCase();
 
   if (upperPattern === 'CODE128' || upperPattern === '128') {
-    // 1D Code 128 Barcode (x=16, y=100, height=130 dots)
-    lines.push(`BARCODE ${xOffset + 16},100,"128",130,0,0,2,4,"${code}"`);
-    lines.push(`TEXT ${xOffset + 16},265,"3",0,1,1,"PASS CODE: ${code}"`);
+    lines.push(`BARCODE ${xOffset + 32},60,"128",140,0,0,2,4,"${code}"`);
+    lines.push(`TEXT ${xOffset + 92},235,"2",0,1,1,"PASS CODE:"`);
+    lines.push(`TEXT ${xOffset + 96},270,"3",0,1,1,"${code}"`);
   } else if (upperPattern === 'CODE39' || upperPattern === '39') {
-    // 1D Code 39 Barcode (x=16, y=100, height=130 dots)
-    lines.push(`BARCODE ${xOffset + 16},100,"39",130,0,0,2,4,"${code}"`);
-    lines.push(`TEXT ${xOffset + 16},265,"3",0,1,1,"PASS CODE: ${code}"`);
+    lines.push(`BARCODE ${xOffset + 32},60,"39",140,0,0,2,4,"${code}"`);
+    lines.push(`TEXT ${xOffset + 92},235,"2",0,1,1,"PASS CODE:"`);
+    lines.push(`TEXT ${xOffset + 96},270,"3",0,1,1,"${code}"`);
   } else {
-    // Default: 2D QR Code centered with pass code text beneath
-    // QR Code (x=55, y=60, ECC=L, cell_width=6, mode=A, rotation=0)
-    lines.push(`QRCODE ${xOffset + 55},60,L,6,A,0,"${qrData}"`);
-    lines.push(`TEXT ${xOffset + 16},275,"3",0,1,1,"PASS CODE: ${code}"`);
+    // Clean centered QR Code + PASS CODE text ONLY
+    lines.push(`QRCODE ${xOffset + 62},40,L,6,A,0,"${qrData}"`);
+    lines.push(`TEXT ${xOffset + 92},250,"2",0,1,1,"PASS CODE:"`);
+    lines.push(`TEXT ${xOffset + 96},285,"3",0,1,1,"${code}"`);
   }
 
-  // Outer Decorative Border
+  // Outer Box
   lines.push(`BOX ${xOffset + 8},8,${boxRight},${boxBottom},2`);
 
   return lines;
@@ -78,13 +78,14 @@ function generateSinglePass(pass, options = {}) {
   } = options;
 
   const lines = [
-    `SIZE ${widthMm} mm, ${heightMm} mm`,
+    `SIZE 80 mm, ${heightMm} mm`,
     `GAP ${gapMm} mm, 0 mm`,
     `SPEED ${speed}`,
     `DENSITY ${density}`,
     `DIRECTION ${direction}`,
     'REFERENCE 0,0',
     'SET TEAR ON',
+    'SET PAUSE OFF',
     'CLS',
     ...buildLabelCommands(pass, 0, options),
     'PRINT 1,1'
@@ -118,6 +119,7 @@ function generateDualColumnPasses(pass1, pass2, options = {}) {
     `DIRECTION ${direction}`,
     'REFERENCE 0,0',
     'SET TEAR ON',
+    'SET PAUSE OFF',
     'CLS'
   ];
 
@@ -133,21 +135,54 @@ function generateDualColumnPasses(pass1, pass2, options = {}) {
 }
 
 /**
- * Generate Batch Payload
+ * Generate Batch Payload with Header Sent ONLY ONCE
  */
 function generateBatch(passes = [], options = {}) {
-  const dualColumn = options.dualColumn !== false;
-  if (!dualColumn) {
-    return passes.map(p => generateSinglePass(p, options)).join('');
+  if (!passes || passes.length === 0) return '';
+  const {
+    widthMm = 38,
+    heightMm = 50,
+    gapMm = 3,
+    columnGapMm = 4,
+    speed = 4,
+    density = 8,
+    direction = 1,
+    dualColumn = true
+  } = options;
+
+  const totalWidthMm = (widthMm * 2) + columnGapMm;
+  const rightColumnOffsetDots = Math.round((widthMm + columnGapMm) * 8);
+
+  const lines = [
+    `SIZE ${totalWidthMm} mm, ${heightMm} mm`,
+    `GAP ${gapMm} mm, 0 mm`,
+    `SPEED ${speed}`,
+    `DENSITY ${density}`,
+    `DIRECTION ${direction}`,
+    'REFERENCE 0,0',
+    'SET TEAR ON',
+    'SET PAUSE OFF'
+  ];
+
+  if (dualColumn) {
+    for (let i = 0; i < passes.length; i += 2) {
+      const p1 = passes[i];
+      const p2 = passes[i + 1] || null;
+
+      lines.push('CLS');
+      if (p1) lines.push(...buildLabelCommands(p1, 0, options));
+      if (p2) lines.push(...buildLabelCommands(p2, rightColumnOffsetDots, options));
+      lines.push('PRINT 1,1');
+    }
+  } else {
+    for (const p of passes) {
+      lines.push('CLS');
+      lines.push(...buildLabelCommands(p, 0, options));
+      lines.push('PRINT 1,1');
+    }
   }
 
-  let batchTspl = '';
-  for (let i = 0; i < passes.length; i += 2) {
-    const p1 = passes[i];
-    const p2 = passes[i + 1] || null;
-    batchTspl += generateDualColumnPasses(p1, p2, options);
-  }
-  return batchTspl;
+  return lines.join('\r\n') + '\r\n';
 }
 
 /**
