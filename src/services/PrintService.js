@@ -33,7 +33,11 @@ async function getPrintBatches({ eventId = null, status = 'all', page = 1, limit
   const total = countResult ? countResult.total : 0;
 
   const batches = await query(
-    `SELECT pb.*, pb.total_requested as quantity, u.name as created_by_name, c.name as category_name, e.event_name
+    `SELECT pb.*, 
+            COALESCE(NULLIF(pb.total_requested, 0), (SELECT COUNT(*) FROM passes WHERE print_batch_id = pb.id), 0) as quantity,
+            COALESCE(NULLIF(pb.total_requested, 0), (SELECT COUNT(*) FROM passes WHERE print_batch_id = pb.id), 0) as total_requested,
+            (SELECT COUNT(*) FROM passes WHERE print_batch_id = pb.id AND printed = 1) as actual_printed_count,
+            u.name as created_by_name, c.name as category_name, e.event_name
      FROM print_batches pb
      LEFT JOIN users u ON pb.created_by = u.id
      LEFT JOIN pass_categories c ON pb.category_id = c.id
@@ -279,7 +283,11 @@ async function reprintBatch(batchId, { userId, userName, ipAddress, userAgent } 
  */
 async function getBatchDetails(batchId) {
   const batches = await query(
-    `SELECT pb.*, u.name as created_by_name, c.name as category_name, e.event_name
+    `SELECT pb.*, 
+            COALESCE(NULLIF(pb.total_requested, 0), (SELECT COUNT(*) FROM passes WHERE print_batch_id = pb.id), 0) as quantity,
+            COALESCE(NULLIF(pb.total_requested, 0), (SELECT COUNT(*) FROM passes WHERE print_batch_id = pb.id), 0) as total_requested,
+            (SELECT COUNT(*) FROM passes WHERE print_batch_id = pb.id AND printed = 1) as actual_printed_count,
+            u.name as created_by_name, c.name as category_name, e.event_name
      FROM print_batches pb
      LEFT JOIN users u ON pb.created_by = u.id
      LEFT JOIN pass_categories c ON pb.category_id = c.id
