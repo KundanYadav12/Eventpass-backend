@@ -409,15 +409,17 @@ async function processBatchChunk(batchId, chunkSize = 50, printerName = null, { 
       };
     }
 
-    // Direct Spooling mode (Running on same Windows host)
-    try {
-      await printRawTspl(activePrinter, payload, `Batch_${batchId}_Chunk_${unprintedPasses.length}`);
-    } catch (spoolError) {
-      await conn.query(
-        'UPDATE print_batches SET status = "paused_out_of_stock", updated_at = NOW() WHERE id = ?',
-        [batchId]
-      );
-      throw new Error(`Printer Spooler Error: ${spoolError.message}. Batch marked as paused_out_of_stock.`);
+    // Direct Spooling mode (only if spoolOnServer is explicitly true)
+    if (spoolOnServer) {
+      try {
+        await printRawTspl(activePrinter, payload, `Batch_${batchId}_Chunk_${unprintedPasses.length}`);
+      } catch (spoolError) {
+        await conn.query(
+          'UPDATE print_batches SET status = "paused_out_of_stock", updated_at = NOW() WHERE id = ?',
+          [batchId]
+        );
+        throw new Error(`Printer Spooler Error: ${spoolError.message}. Batch marked as paused_out_of_stock.`);
+      }
     }
 
     // Mark passes as printed ONLY AFTER successful spooling
