@@ -9,8 +9,10 @@ const { logAudit } = require('./AuditService');
 /**
  * List all print batches with progress metrics
  */
-async function getPrintBatches({ eventId = null, status = 'all', page = 1, limit = 20 } = {}) {
-  const offset = (page - 1) * limit;
+async function getPrintBatches({ eventId = null, status = 'all', page = 1, limit = 500 } = {}) {
+  const safeLimit = (limit === 'all' || !limit) ? 500 : Math.min(Number(limit) || 500, 1000);
+  const safePage = Math.max(1, Number(page) || 1);
+  const offset = (safePage - 1) * safeLimit;
   const whereClauses = [];
   const params = [];
 
@@ -45,16 +47,16 @@ async function getPrintBatches({ eventId = null, status = 'all', page = 1, limit
      ${whereSql}
      ORDER BY pb.id DESC
      LIMIT ? OFFSET ?`,
-    [...params, limit, offset]
+    [...params, safeLimit, offset]
   );
 
   return {
     batches,
     pagination: {
-      page: Number(page),
-      limit: Number(limit),
+      page: safePage,
+      limit: safeLimit,
       totalRecords: total,
-      totalPages: Math.ceil(total / limit) || 1
+      totalPages: Math.ceil(total / safeLimit) || 1
     }
   };
 }
