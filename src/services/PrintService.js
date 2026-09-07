@@ -82,11 +82,11 @@ async function createPrintBatch({ eventId, categoryId, name, quantity, passType 
       throw new Error('Pass Category is required to create a print batch');
     }
 
-    // Select existing unprinted active passes for this category & event
+    // Select existing unprinted active passes for this category & event that are not already bound to an active print batch
     const [existingPasses] = await conn.query(
       `SELECT p.id, p.code, p.code_type, p.valid_from, p.valid_until
        FROM passes p
-       WHERE p.category_id = ? AND (p.event_id = ? OR ? IS NULL) AND p.printed = 0 AND p.status = 'active'
+       WHERE p.category_id = ? AND (p.event_id = ? OR ? IS NULL) AND p.printed = 0 AND p.status = 'active' AND p.print_batch_id IS NULL
        ORDER BY p.id ASC
        LIMIT ?
        FOR UPDATE`,

@@ -160,22 +160,37 @@ function generateBatch(passes = [], options = {}) {
     `DENSITY ${density}`,
     `DIRECTION ${direction}`,
     'REFERENCE 0,0',
+    'OFFSET 0 mm',
     'SET TEAR ON',
     'SET PAUSE OFF'
   ];
 
+  // Deduplicate passes array
+  const seenCodes = new Set();
+  const uniquePasses = [];
+  for (const p of passes) {
+    if (!p || !p.code) continue;
+    const cleanCode = sanitizeAscii(p.code).toUpperCase();
+    if (!seenCodes.has(cleanCode)) {
+      seenCodes.add(cleanCode);
+      uniquePasses.push(p);
+    }
+  }
+
   if (dualColumn) {
-    for (let i = 0; i < passes.length; i += 2) {
-      const p1 = passes[i];
-      const p2 = passes[i + 1] || null;
+    for (let i = 0; i < uniquePasses.length; i += 2) {
+      const p1 = uniquePasses[i];
+      const p2 = uniquePasses[i + 1] || null;
 
       lines.push('CLS');
       if (p1) lines.push(...buildLabelCommands(p1, 0, options));
-      if (p2) lines.push(...buildLabelCommands(p2, rightColumnOffsetDots, options));
+      if (p2 && (!p1 || p2.code !== p1.code)) {
+        lines.push(...buildLabelCommands(p2, rightColumnOffsetDots, options));
+      }
       lines.push('PRINT 1,1');
     }
   } else {
-    for (const p of passes) {
+    for (const p of uniquePasses) {
       lines.push('CLS');
       lines.push(...buildLabelCommands(p, 0, options));
       lines.push('PRINT 1,1');
@@ -195,7 +210,7 @@ function generateSingleBarcode(barcodeValue = '55KDBD2', eventName = 'EVENTGEN 2
     category_name: category,
     valid_date_label: 'VALID: 2026',
     qr_data: barcodeValue,
-    barcode_pattern: options.pattern || 'QR_CODE'
+    barcode_pattern: options.pattern || 'CODE128'
   };
 
   return generateSinglePass(dummyPass, options);
@@ -205,7 +220,17 @@ function generateSingleBarcode(barcodeValue = '55KDBD2', eventName = 'EVENTGEN 2
  * Generate Media Gap Calibration Command
  */
 function generateCalibration(options = {}) {
-  return 'AUTODETECT\r\nGAP-DETECT\r\nFEED 1\r\n';
+  const gapMm = options.gapMm || 3;
+  return [
+    'SIZE 80 mm, 50 mm',
+    `GAP ${gapMm} mm, 0 mm`,
+    'DIRECTION 1',
+    'REFERENCE 0,0',
+    'GAPDETECT',
+    'AUTODETECT',
+    'FORMFEED',
+    ''
+  ].join('\r\n');
 }
 
 /**

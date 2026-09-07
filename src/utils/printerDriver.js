@@ -4,21 +4,48 @@
  * 
  * Features:
  * - Direct winspool.drv RAW pass-through (bypasses GDI/PDF rasterization)
+ * - Powered by high-speed native Win32 Spooler engine (RawSpooler.exe) with fallback
  * - Real-time Windows Print Queue & WMI status inspection
  * - Dynamic printer auto-discovery
  * - Job tracking and spooler verification
  * - Dynamic calibration, reconnect, and unpause commands
  */
 
-const { exec } = require('child_process');
+const { exec, execFile, spawn } = require('child_process');
 const util = require('util');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
 const execAsync = util.promisify(exec);
+const execFileAsync = util.promisify(execFile);
 
 const DEFAULT_PRINTER_NAME = process.env.PRINTER_NAME || 'TSC TE244';
+
+/**
+ * Locate the pre-compiled native RawSpooler.exe binary
+ */
+function getSpoolerExePath() {
+  const candidates = [
+    process.env.RAW_SPOOLER_BIN,
+    path.join(__dirname, '..', '..', 'bin', 'RawSpooler.exe'),
+    path.join(__dirname, '..', '..', '..', 'release', 'RawSpooler.exe'),
+    path.join(__dirname, '..', '..', '..', 'windows-print-app', 'bin', 'RawSpooler.exe'),
+    path.join(process.cwd(), 'bin', 'RawSpooler.exe'),
+    path.join(process.cwd(), 'RawSpooler.exe')
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Ignore
+    }
+  }
+  return null;
+}
 
 /**
  * List all installed Windows Printers dynamically
@@ -30,11 +57,26 @@ async function listPrinters() {
     ];
   }
 
+  const spoolerExe = getSpoolerExePath();
+  if (spoolerExe) {
+    try {
+      const { stdout } = await execFileAsync(spoolerExe, ['list'], { timeout: 4000 });
+      if (stdout && stdout.trim()) {
+        const parsed = JSON.parse(stdout.trim());
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch (err) {
+      console.warn('[PrinterDriver] RawSpooler list failed, falling back to PowerShell:', err.message);
+    }
+  }
+
   try {
     const psScript = `
       Get-Printer | Select-Object Name, DriverName, PortName, PrinterStatus, Type, WorkOffline, Default | ConvertTo-Json
     `;
-    const { stdout } = await execAsync(`powershell -NoProfile -NonInteractive -Command "${psScript.replace(/\r?\n/g, ' ')}"`);
+    const { stdout } = await execAsync(`powershell -NoProfile -NonInteractive -Command "${psScript.replace(/\r?\n/g, ' ')}"`, { timeout: 6000 });
     if (!stdout || !stdout.trim()) return [];
 
     const parsed = JSON.parse(stdout);
@@ -80,6 +122,36 @@ async function getDetailedPrinterDiagnostics(printerName = DEFAULT_PRINTER_NAME)
     };
   }
 
+  const spoolerExe = getSpoolerExePath();
+  if (spoolerExe) {
+    try {
+      const { stdout } = await execFileAsync(spoolerExe, ['status', printerName], { timeout: 3000 });
+      if (stdout && stdout.trim()) {
+        const parsed = JSON.parse(stdout.trim());
+        if (parsed && typeof parsed.isReady !== 'undefined') {
+          return {
+            isReady: Boolean(parsed.isReady),
+            isOffline: Boolean(parsed.isOffline),
+            isPaused: Boolean(parsed.isPaused),
+            hasErrors: Boolean(parsed.hasErrors),
+            name: parsed.name || printerName,
+            status: parsed.status || 'Normal',
+            statusLabel: parsed.statusLabel || (parsed.isReady ? 'Idle / Ready' : 'Unavailable'),
+            port: parsed.port || 'USB001',
+            driver: parsed.driver || 'Windows Driver',
+            printerStatus: parsed.printerStatus || 3,
+            detectedErrorState: parsed.detectedErrorState || 0,
+            activeJobCount: parsed.activeJobCount || 0,
+            jobs: parsed.jobs || [],
+            explanation: parsed.explanation || (parsed.isReady ? `Printer '${printerName}' is online and ready.` : `Printer '${printerName}' is unavailable.`)
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('[PrinterDriver] RawSpooler status failed, falling back to WMI:', err.message);
+    }
+  }
+
   const tempPs1 = path.join(os.tmpdir(), `eventgen_diag_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.ps1`);
 
   const psCode = `
@@ -118,10 +190,9 @@ $result = @{
 $result | ConvertTo-Json -Depth 3
 `;
 
-  fs.writeFileSync(tempPs1, psCode, 'utf8');
-
   try {
-    const { stdout } = await execAsync(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tempPs1}"`);
+    fs.writeFileSync(tempPs1, psCode, 'utf8');
+    const { stdout } = await execAsync(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tempPs1}"`, { timeout: 6000 });
     if (!stdout || !stdout.trim()) {
       return { isReady: false, status: 'Unknown', explanation: 'No response from Windows Spooler' };
     }
@@ -136,12 +207,10 @@ $result | ConvertTo-Json -Depth 3
         name: printerName,
         status: 'NotFound',
         statusLabel: 'Not Found',
-        explanation: `Printer '${printerName}' was not found in Windows Printers & Scanners. Please check USB cable or add printer in Windows Settings.`
+        explanation: `Printer '${printerName}' was not found in Windows Printers & Scanners. Check USB cable.`
       };
     }
 
-    // Map WMI Status Codes:
-    // 1=Other, 2=Unknown, 3=Idle/Ready, 4=Printing, 5=Warmup, 6=Stopped, 7=Offline, 8=Paused, 9=Error
     const statusMap = {
       1: 'Other',
       2: 'Unknown',
@@ -160,11 +229,11 @@ $result | ConvertTo-Json -Depth 3
 
     let explanation = `Printer '${data.Name}' is ready on port ${data.Port}.`;
     if (isOffline) {
-      explanation = `Printer is marked Offline in Windows. Ensure printer power is ON and USB cable is securely connected to port ${data.Port}.`;
+      explanation = `Printer is marked Offline in Windows. Ensure power is ON and USB is plugged into ${data.Port}.`;
     } else if (isPaused) {
-      explanation = 'Printer queue is paused in Windows Spooler. Click Unpause to resume printing.';
+      explanation = 'Printer queue is paused in Windows Spooler. Click Unpause to resume.';
     } else if (hasErrors) {
-      explanation = `Printer error state: ${data.DetectedErrorState}. Please check media roll, ribbon, or print head latch.`;
+      explanation = `Printer error state: ${data.DetectedErrorState}. Please check media roll or ribbon.`;
     } else if (data.ActiveJobCount > 0) {
       explanation = `Printer has ${data.ActiveJobCount} job(s) in Windows spool queue.`;
     }
@@ -189,7 +258,7 @@ $result | ConvertTo-Json -Depth 3
       isReady: true,
       status: 'Normal',
       statusLabel: 'Normal',
-      explanation: `Diagnostic query completed with note: ${err.message}`
+      explanation: `Diagnostics note: ${err.message}`
     };
   } finally {
     try {
@@ -207,15 +276,13 @@ $result | ConvertTo-Json -Depth 3
 async function reconnectPrinter(printerName = DEFAULT_PRINTER_NAME) {
   if (process.platform === 'win32') {
     try {
-      // Attempt to toggle offline state if needed via PowerShell
       const psCmd = `
         $p = Get-Printer -Name '${printerName.replace(/'/g, "''")}' -ErrorAction SilentlyContinue
         if ($p) {
-          # Resume printer if paused
           Resume-PrintJob -PrinterName '${printerName.replace(/'/g, "''")}' -ID * -ErrorAction SilentlyContinue
         }
       `;
-      await execAsync(`powershell -NoProfile -NonInteractive -Command "${psCmd.replace(/\r?\n/g, ' ')}"`);
+      await execAsync(`powershell -NoProfile -NonInteractive -Command "${psCmd.replace(/\r?\n/g, ' ')}"`, { timeout: 4000 });
     } catch (err) {
       console.warn('[PrinterDriver] Reconnect command note:', err.message);
     }
@@ -225,7 +292,7 @@ async function reconnectPrinter(printerName = DEFAULT_PRINTER_NAME) {
 }
 
 /**
- * Send RAW command bytes directly to Windows Print Spooler using winspool.drv
+ * Send RAW command bytes directly to Windows Print Spooler using native RawSpooler.exe or winspool.drv
  * Works with TSPL, ZPL, ESC/POS, or generic text streams.
  * 
  * @param {string} printerName - Exact Windows printer name (e.g. "TSC TE244", "Zebra ZD420")
@@ -237,7 +304,6 @@ async function printRawData(printerName = DEFAULT_PRINTER_NAME, rawContent, docN
     throw new Error('Raw print command content is empty');
   }
 
-  // Ensure standard trailing line break
   const rawData = rawContent.endsWith('\r\n') ? rawContent : (rawContent.endsWith('\n') ? rawContent.replace(/\n$/, '\r\n') : rawContent + '\r\n');
 
   if (process.platform !== 'win32') {
@@ -252,12 +318,65 @@ async function printRawData(printerName = DEFAULT_PRINTER_NAME, rawContent, docN
     };
   }
 
-  // Pre-check printer existence and online state
   const diagBefore = await getDetailedPrinterDiagnostics(printerName);
   if (diagBefore.isOffline) {
     throw new Error(`Printer '${printerName}' is Offline in Windows on port '${diagBefore.port}'. Check USB cable and power.`);
   }
 
+  const spoolerExe = getSpoolerExePath();
+
+  // PRIMARY HIGH-SPEED PATH: Native C# Win32 RAW Spooler Engine via direct stdin piping
+  if (spoolerExe) {
+    try {
+      const result = await new Promise((resolve, reject) => {
+        const child = spawn(spoolerExe, ['print', printerName, docName, '-'], {
+          windowsHide: true,
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let stdoutData = '';
+        let stderrData = '';
+
+        child.stdout.on('data', chunk => { stdoutData += chunk.toString(); });
+        child.stderr.on('data', chunk => { stderrData += chunk.toString(); });
+
+        child.on('error', err => reject(err));
+
+        child.on('close', code => {
+          if (code === 0) {
+            try {
+              const parsed = JSON.parse(stdoutData.trim());
+              if (parsed.success) {
+                resolve(parsed);
+              } else {
+                reject(new Error(parsed.message || `Native spooler error (Code: ${parsed.errorCode})`));
+              }
+            } catch (e) {
+              resolve({ success: true, bytesSent: rawData.length, message: stdoutData.trim() });
+            }
+          } else {
+            reject(new Error(stderrData || stdoutData || `RawSpooler exited with error code ${code}`));
+          }
+        });
+
+        child.stdin.write(Buffer.from(rawData, 'utf8'), () => {
+          child.stdin.end();
+        });
+      });
+
+      return {
+        success: true,
+        bytesSent: result.bytesSent || rawData.length,
+        jobName: docName,
+        rawSent: rawData,
+        message: `RAW commands (${rawData.length} bytes) successfully spooled to Windows queue '${printerName}' via Native Spooler Engine.`
+      };
+    } catch (nativeErr) {
+      console.warn('[PrinterDriver] Native RawSpooler streaming encountered error, attempting fallback:', nativeErr.message);
+    }
+  }
+
+  // FALLBACK PATH: Temporary file spooler via winspool.drv
   const tempPrnPath = path.join(os.tmpdir(), `eventgen_print_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.prn`);
   const tempPs1Path = path.join(os.tmpdir(), `eventgen_spooler_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.ps1`);
   
@@ -363,17 +482,12 @@ if ($result) {
       throw new Error(stderr || `Windows print spooler rejected RAW print job to '${printerName}'`);
     }
 
-    // Check spooler state post-print (after 800ms)
-    await new Promise(r => setTimeout(r, 800));
-    const diagAfter = await getDetailedPrinterDiagnostics(printerName);
-
     return {
       success: true,
       bytesSent: rawData.length,
       jobName: docName,
       rawSent: rawData,
-      diagnostics: diagAfter,
-      message: `RAW commands (${rawData.length} bytes) successfully spooled to Windows queue '${printerName}' on Port '${diagAfter.port || "USB001"}'.`
+      message: `RAW commands (${rawData.length} bytes) successfully spooled to Windows queue '${printerName}'.`
     };
   } finally {
     try {
