@@ -5,6 +5,49 @@ const { generateAccessToken, generateRefreshToken, verifyRefreshToken } = requir
 const { sendEmail } = require('../config/email');
 const { logAudit } = require('../services/AuditService');
 
+async function getUserPermissionsPayload(user) {
+  if (user.role_name === 'SUPERADMIN' || user.role_id === 1) {
+    const allPerms = await query('SELECT code FROM permissions');
+    const allCodes = allPerms.map(p => p.code);
+    return {
+      permissions: allCodes,
+      eventPermissions: {}
+    };
+  }
+
+  const eventPermissionsMap = {};
+  const eventPermRows = await query(
+    `SELECT aep.event_id, p.code
+     FROM admin_event_permissions aep
+     JOIN permissions p ON aep.permission_id = p.id
+     WHERE aep.user_id = ?`,
+    [user.id]
+  );
+
+  for (const row of eventPermRows) {
+    if (!eventPermissionsMap[row.event_id]) {
+      eventPermissionsMap[row.event_id] = [];
+    }
+    eventPermissionsMap[row.event_id].push(row.code);
+  }
+
+  let defaultPerms = user.event_id && eventPermissionsMap[user.event_id] ? eventPermissionsMap[user.event_id] : [];
+  if (defaultPerms.length === 0) {
+    const rolePerms = await query(
+      `SELECT p.code FROM permissions p
+       JOIN role_permissions rp ON p.id = rp.permission_id
+       WHERE rp.role_id = ?`,
+      [user.role_id]
+    );
+    defaultPerms = rolePerms.map(p => p.code);
+  }
+
+  return {
+    permissions: defaultPerms,
+    eventPermissions: eventPermissionsMap
+  };
+}
+
 /**
  * User Login (SuperAdmin & Admin)
  */
@@ -19,9 +62,10 @@ async function login(req, res, next) {
     }
 
     const users = await query(
-      `SELECT u.*, r.name as role_name
+      `SELECT u.*, r.name as role_name, e.event_name, e.event_code
        FROM users u
        JOIN roles r ON u.role_id = r.id
+       LEFT JOIN events e ON u.event_id = e.id
        WHERE u.email = ? LIMIT 1`,
       [email.trim().toLowerCase()]
     );
@@ -42,12 +86,7 @@ async function login(req, res, next) {
     }
 
     // Fetch user permissions
-    const permissions = await query(
-      `SELECT p.code FROM permissions p
-       JOIN role_permissions rp ON p.id = rp.permission_id
-       WHERE rp.role_id = ?`,
-      [user.role_id]
-    );
+    const permData = await getUserPermissionsPayload(user);
 
     // Update last login
     await query('UPDATE users SET last_login_at = NOW() WHERE id = ?', [user.id]);
@@ -55,7 +94,8 @@ async function login(req, res, next) {
     const tokenPayload = {
       userId: user.id,
       email: user.email,
-      role: user.role_name
+      role: user.role_name,
+      eventId: user.event_id
     };
 
     const accessToken = generateAccessToken(tokenPayload);
@@ -81,7 +121,13 @@ async function login(req, res, next) {
         name: user.name,
         email: user.email,
         role: user.role_name,
-        permissions: permissions.map(p => p.code)
+        roleId: user.role_id,
+        eventId: user.event_id,
+        eventName: user.event_name,
+        eventCode: user.event_code,
+        assignedEvent: user.event_id ? { id: user.event_id, name: user.event_name, code: user.event_code } : null,
+        permissions: permData.permissions,
+        eventPermissions: permData.eventPermissions
       }
     });
   } catch (error) {
@@ -104,20 +150,52 @@ async function refreshToken(req, res, next) {
       return res.status(401).json({ success: false, message: 'Invalid or expired refresh token', error });
     }
 
-    const users = await query('SELECT id, email, role_id, is_active FROM users WHERE id = ?', [payload.userId]);
+    const users = await query(
+      `SELECT u.id, u.name, u.email, u.role_id, u.event_id, u.is_active,
+              r.name as role_name, e.event_name, e.event_code
+       FROM users u
+       JOIN roles r ON u.role_id = r.id
+       LEFT JOIN events e ON u.event_id = e.id
+       WHERE u.id = ? LIMIT 1`,
+      [payload.userId]
+    );
+
     if (users.length === 0 || !users[0].is_active) {
       return res.status(403).json({ success: false, message: 'User inactive or not found' });
     }
 
-    const newAccessToken = generateAccessToken({
-      userId: payload.userId,
-      email: payload.email,
-      role: payload.role
-    });
+    const user = users[0];
+
+    const tokenPayload = {
+      userId: user.id,
+      email: user.email,
+      role: user.role_name,
+      eventId: user.event_id
+    };
+
+    const newAccessToken = generateAccessToken(tokenPayload);
+    const newRefreshToken = generateRefreshToken(tokenPayload);
+
+    // Fetch user permissions
+    const permData = await getUserPermissionsPayload(user);
 
     res.json({
       success: true,
-      accessToken: newAccessToken
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role_name,
+        roleId: user.role_id,
+        eventId: user.event_id,
+        eventName: user.event_name,
+        eventCode: user.event_code,
+        assignedEvent: user.event_id ? { id: user.event_id, name: user.event_name, code: user.event_code } : null,
+        permissions: permData.permissions,
+        eventPermissions: permData.eventPermissions
+      }
     });
   } catch (error) {
     next(error);
@@ -189,7 +267,13 @@ async function forgotPassword(req, res, next) {
       [user.id, tokenHash, expiresAt]
     );
 
-    const resetUrl = `${process.env.FRONTEND_URL || 'https://eventgen.duckdns.org'}/reset-password?token=${rawToken}&email=${encodeURIComponent(user.email)}`;
+    // Dynamically resolve frontend base URL (supporting managemyshow.com and eventgen.duckdns.org)
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const defaultFrontend = process.env.FRONTEND_URL || 'https://managemyshow.com';
+    const clientBaseUrl = host ? `${proto}://${host}` : defaultFrontend;
+
+    const resetUrl = `${clientBaseUrl.replace(/\/+$/, '')}/reset-password?token=${rawToken}&email=${encodeURIComponent(user.email)}`;
 
     await sendEmail({
       to: user.email,

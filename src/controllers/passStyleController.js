@@ -33,6 +33,22 @@ async function getStyleById(req, res, next) {
   }
 }
 
+function validateBackgroundImageSize(backgroundImageUrl) {
+  if (!backgroundImageUrl || typeof backgroundImageUrl !== 'string') return;
+  if (backgroundImageUrl.startsWith('data:image/')) {
+    const commaIdx = backgroundImageUrl.indexOf(',');
+    const base64Data = commaIdx !== -1 ? backgroundImageUrl.slice(commaIdx + 1) : backgroundImageUrl;
+    const padding = (base64Data.endsWith('==') ? 2 : base64Data.endsWith('=') ? 1 : 0);
+    const byteLength = Math.round((base64Data.length * 3) / 4 - padding);
+    // Hard ceiling: 500 KB (512,000 bytes) + 3KB buffer
+    if (byteLength > 515 * 1024) {
+      const err = new Error(`Background image size (${Math.round(byteLength / 1024)} KB) exceeds the maximum allowed limit of 500 KB.`);
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+}
+
 async function createStyle(req, res, next) {
   try {
     const isSuperAdmin = req.user?.role === 'SUPERADMIN';
@@ -46,6 +62,8 @@ async function createStyle(req, res, next) {
       elementsConfig,
       isDefault
     } = req.body;
+
+    validateBackgroundImageSize(backgroundImageUrl);
 
     const assignedEventId = isSuperAdmin ? (eventId || req.effectiveEventId) : req.effectiveEventId;
 
@@ -87,6 +105,8 @@ async function updateStyle(req, res, next) {
       elementsConfig,
       isDefault
     } = req.body;
+
+    validateBackgroundImageSize(backgroundImageUrl);
 
     const style = await passStyleService.updateStyle(id, {
       name,

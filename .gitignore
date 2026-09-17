@@ -46,3 +46,9 @@ Thumbs.db
 *.key
 *.cert
 *.crt
+
+# Test runners, scratch & inspection scripts
+test_*.js
+scratch_*.js
+execute_trim_passes.js
+validate_modules.js

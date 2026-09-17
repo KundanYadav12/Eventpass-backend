@@ -37,29 +37,52 @@ function buildLabelCommands(pass, xOffset = 0, options = {}) {
   // Width in dots: 38mm = ~304 dots. Height in dots: 50mm = ~400 dots
   const labelWidthDots = Math.round(widthMm * 8);
   const labelHeightDots = Math.round(heightMm * 8);
-  const boxRight = xOffset + labelWidthDots - 8;
-  const boxBottom = labelHeightDots - 8;
 
   const lines = [];
   const upperPattern = String(pattern || pass.barcode_pattern || 'QR_CODE').toUpperCase();
 
+  // PASS CODE: label centered
+  const passLabelWidth = 120;
+  const passLabelX = xOffset + Math.max(10, Math.round((labelWidthDots - passLabelWidth) / 2));
+
+  // Dynamic code centering (font 3 approx 16 dots per char)
+  const codeWidth = code.length * 16;
+  const codeX = xOffset + Math.max(10, Math.round((labelWidthDots - codeWidth) / 2));
+
   if (upperPattern === 'CODE128' || upperPattern === '128') {
-    lines.push(`BARCODE ${xOffset + 32},60,"128",140,0,0,2,4,"${code}"`);
-    lines.push(`TEXT ${xOffset + 92},235,"2",0,1,1,"PASS CODE:"`);
-    lines.push(`TEXT ${xOffset + 96},270,"3",0,1,1,"${code}"`);
+    const approxUnits = code.length * 11 + 35;
+    const narrow = (approxUnits * 2 + 36 > labelWidthDots) ? 1 : 2;
+    const wide = narrow * 2;
+    const barcodeWidth = approxUnits * narrow;
+    const barcodeX = xOffset + Math.max(12, Math.round((labelWidthDots - barcodeWidth) / 2));
+    lines.push(`BARCODE ${barcodeX},50,"128",135,0,0,${narrow},${wide},"${code}"`);
+    lines.push(`TEXT ${passLabelX},225,"2",0,1,1,"PASS CODE:"`);
+    lines.push(`TEXT ${codeX},260,"3",0,1,1,"${code}"`);
   } else if (upperPattern === 'CODE39' || upperPattern === '39') {
-    lines.push(`BARCODE ${xOffset + 32},60,"39",140,0,0,2,4,"${code}"`);
-    lines.push(`TEXT ${xOffset + 92},235,"2",0,1,1,"PASS CODE:"`);
-    lines.push(`TEXT ${xOffset + 96},270,"3",0,1,1,"${code}"`);
+    const approxUnits = code.length * 16 + 35;
+    const narrow = (approxUnits * 2 + 30 > labelWidthDots) ? 1 : 2;
+    const wide = narrow * 2;
+    const barcodeWidth = approxUnits * narrow;
+    const barcodeX = xOffset + Math.max(12, Math.round((labelWidthDots - barcodeWidth) / 2));
+    lines.push(`BARCODE ${barcodeX},50,"39",135,0,0,${narrow},${wide},"${code}"`);
+    lines.push(`TEXT ${passLabelX},225,"2",0,1,1,"PASS CODE:"`);
+    lines.push(`TEXT ${codeX},260,"3",0,1,1,"${code}"`);
   } else {
     // High-contrast, scannable QR Code centered with wide quiet zones
-    lines.push(`QRCODE ${xOffset + 89},35,M,6,A,0,"${qrData}"`);
-    lines.push(`TEXT ${xOffset + 92},235,"2",0,1,1,"PASS CODE:"`);
-    lines.push(`TEXT ${xOffset + 96},270,"3",0,1,1,"${code}"`);
+    const qrCellWidth = labelWidthDots < 260 ? 4 : 5;
+    const approxQrDots = qrCellWidth * 25;
+    const qrX = xOffset + Math.max(12, Math.round((labelWidthDots - approxQrDots) / 2));
+    lines.push(`QRCODE ${qrX},45,M,${qrCellWidth},A,0,M2,S7,"${qrData}"`);
+    lines.push(`TEXT ${passLabelX},225,"2",0,1,1,"PASS CODE:"`);
+    lines.push(`TEXT ${codeX},260,"3",0,1,1,"${code}"`);
   }
 
-  // Outer Box
-  lines.push(`BOX ${xOffset + 8},8,${boxRight},${boxBottom},2`);
+  // Optional Outer Box (only if explicitly enabled)
+  if (options.showBorder) {
+    const boxRight = xOffset + labelWidthDots - 6;
+    const boxBottom = labelHeightDots - 6;
+    lines.push(`BOX ${xOffset + 6},6,${boxRight},${boxBottom},1`);
+  }
 
   return lines;
 }

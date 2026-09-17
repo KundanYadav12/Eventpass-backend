@@ -3,7 +3,12 @@ const { query } = require('../config/db');
 
 async function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.substring(7) : null;
+  let token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.substring(7) : null;
+
+  // Also support query param authentication for direct file downloads
+  if (!token && (req.query?.token || req.query?.accessToken)) {
+    token = req.query.token || req.query.accessToken;
+  }
 
   if (!token) {
     return res.status(401).json({
@@ -100,6 +105,39 @@ async function authenticateToken(req, res, next) {
         permissions: defaultPerms,
         eventPermissions: eventPermissionsMap
       };
+    }
+
+    // -------------------------------------------------------------------------
+    // Dedicated Scanner Account RBAC Guard
+    // Confines SCANNER role strictly to the scanning system and assigned event
+    // -------------------------------------------------------------------------
+    if (req.user && (req.user.role === 'SCANNER' || req.user.roleId === 4)) {
+      const fullPath = (req.baseUrl ? `${req.baseUrl}${req.path}` : (req.path || req.originalUrl || '')).toLowerCase();
+      const isScannerAllowed =
+        fullPath.includes('/scan') ||
+        fullPath.includes('/checkpoints') ||
+        fullPath.includes('/events') ||
+        fullPath.includes('/gates') ||
+        fullPath.includes('/auth') ||
+        fullPath.includes('/profile') ||
+        fullPath.includes('/health');
+
+      if (!isScannerAllowed) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Scanner accounts are strictly restricted to the scanning system.'
+        });
+      }
+
+      // Lock effectiveEventId strictly to scanner's assigned event
+      if (req.user.eventId) {
+        req.effectiveEventId = req.user.eventId;
+        if (req.query) req.query.eventId = req.user.eventId;
+        if (req.body && typeof req.body === 'object') {
+          req.body.targetEventId = req.user.eventId;
+          req.body.eventId = req.user.eventId;
+        }
+      }
     }
 
     next();

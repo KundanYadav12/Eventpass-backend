@@ -239,9 +239,10 @@ function formatDateTimeIST(dateInput) {
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
+    second: '2-digit',
     hour12: true
   });
-  return formatted.replace(/\b(am|pm)\b/gi, (m) => m.toUpperCase());
+  return formatted.replace(/\b(am|pm)\b/gi, (m) => m.toLowerCase());
 }
 
 /**
@@ -383,6 +384,16 @@ function formatMySqlDateTime(dateInput = new Date()) {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
 
+/**
+ * Convert any Date, timestamp, or MySQL datetime string to ISO-8601 UTC string (e.g. "2026-09-17T03:45:00.000Z")
+ */
+function toIsoUtcString(dateInput) {
+  if (!dateInput) return null;
+  const d = parseDate(dateInput);
+  if (!d || isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
 module.exports = {
   IST_TIMEZONE,
   IST_OFFSET_MS,
@@ -398,5 +409,6 @@ module.exports = {
   checkValidityWindow,
   calculateRenewalCycle,
   hasScannedInCurrentCycle,
-  formatMySqlDateTime
+  formatMySqlDateTime,
+  toIsoUtcString
 };

@@ -35,8 +35,15 @@ function generateHmacSignature(code) {
  */
 function verifyHmacSignature(code, signature) {
   if (!code || !signature) return false;
-  const expected = generateHmacSignature(code);
-  return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signature, 'hex'));
+  try {
+    const expected = generateHmacSignature(code);
+    const bufExpected = Buffer.from(expected, 'hex');
+    const bufActual = Buffer.from(signature, 'hex');
+    if (bufExpected.length !== bufActual.length) return false;
+    return crypto.timingSafeEqual(bufExpected, bufActual);
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -31,7 +31,8 @@ async function seed() {
     { code: 'print.manage', name: 'Manage Print Batches', module: 'Print', desc: 'Create, start, pause batches' },
     { code: 'users.manage', name: 'Manage Users', module: 'Users', desc: 'Create and edit admin accounts' },
     { code: 'messages.edit', name: 'Edit Messages', module: 'Messages', desc: 'Edit scanner messages' },
-    { code: 'audit.view', name: 'View Audit Logs', module: 'Audit', desc: 'View administrative audit trail' }
+    { code: 'audit.view', name: 'View Audit Logs', module: 'Audit', desc: 'View administrative audit trail' },
+    { code: 'cashiers.manage', name: 'Manage Cashier Accounts', module: 'Cashier', desc: 'Create and view scoped Cashier accounts and sales reports' }
   ];
 
   for (const p of permissionsList) {

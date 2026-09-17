@@ -57,15 +57,29 @@ async function getAuditLogs(req, res, next) {
     const totalRecords = countResult ? countResult.total : 0;
     const totalPages = Math.ceil(totalRecords / pageLimit);
 
-    const logs = await query(
-      `SELECT a.*, e.event_name
-       FROM audit_log a
-       LEFT JOIN events e ON a.event_id = e.id
-       ${whereClause}
-       ORDER BY a.created_at DESC
-       LIMIT ? OFFSET ?`,
-      [...queryParams, pageLimit, offset]
-    );
+    let logs = [];
+    if (totalRecords > 0) {
+      const idRows = await query(
+        `SELECT a.id
+         FROM audit_log a
+         ${whereClause}
+         ORDER BY a.id DESC
+         LIMIT ? OFFSET ?`,
+        [...queryParams, pageLimit, offset]
+      );
+
+      if (idRows.length > 0) {
+        const ids = idRows.map(r => r.id);
+        logs = await query(
+          `SELECT a.*, e.event_name
+           FROM audit_log a
+           LEFT JOIN events e ON a.event_id = e.id
+           WHERE a.id IN (${ids.map(() => '?').join(',')})
+           ORDER BY a.id DESC`,
+          ids
+        );
+      }
+    }
 
     const actions = await query('SELECT DISTINCT action FROM audit_log ORDER BY action ASC');
 

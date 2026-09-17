@@ -85,8 +85,16 @@ async function acquireLock(resourceKey, ttlMs = 5000) {
     }
   }
 
-  // Local in-memory lock fallback
+  // Local in-memory lock fallback with self-pruning to prevent memory growth
   const now = Date.now();
+  if (localLocks.size > 100) {
+    for (const [key, lockObj] of localLocks.entries()) {
+      if (lockObj.expiresAt <= now) {
+        localLocks.delete(key);
+      }
+    }
+  }
+
   const existingLock = localLocks.get(resourceKey);
   if (existingLock && existingLock.expiresAt > now) {
     return { acquired: false, release: async () => {} };

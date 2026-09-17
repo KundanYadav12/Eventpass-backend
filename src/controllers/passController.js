@@ -1,4 +1,5 @@
 const passService = require('../services/PassService');
+const { query } = require('../config/db');
 
 async function getPasses(req, res, next) {
   try {
@@ -24,9 +25,12 @@ async function getPassById(req, res, next) {
       return res.status(404).json({ success: false, message: 'Pass not found' });
     }
 
-    // RBAC check: If Admin, verify event ownership
-    if (req.user?.role === 'ADMIN' && req.user.eventId && result.pass.event_id !== req.user.eventId) {
-      return res.status(403).json({ success: false, message: 'Forbidden: Pass belongs to another event.' });
+    // RBAC check: If Admin, verify event ownership (primary event or user_assigned_events)
+    if (req.user?.role === 'ADMIN' && req.user.eventId && Number(result.pass.event_id) !== Number(req.user.eventId)) {
+      const assigned = await query('SELECT id FROM user_assigned_events WHERE user_id = ? AND event_id = ? LIMIT 1', [req.user.id, result.pass.event_id]);
+      if (!assigned || assigned.length === 0) {
+        return res.status(403).json({ success: false, message: 'Forbidden: Pass belongs to another event.' });
+      }
     }
 
     res.json({
@@ -54,9 +58,12 @@ async function resharePass(req, res, next) {
       return res.status(404).json({ success: false, message: 'Pass not found' });
     }
 
-    // RBAC check: If Admin, verify event ownership
-    if (req.user?.role === 'ADMIN' && req.user.eventId && existing.pass.event_id !== req.user.eventId) {
-      return res.status(403).json({ success: false, message: 'Forbidden: Pass belongs to another event.' });
+    // RBAC check: If Admin, verify event ownership (primary event or user_assigned_events)
+    if (req.user?.role === 'ADMIN' && req.user.eventId && Number(existing.pass.event_id) !== Number(req.user.eventId)) {
+      const assigned = await query('SELECT id FROM user_assigned_events WHERE user_id = ? AND event_id = ? LIMIT 1', [req.user.id, existing.pass.event_id]);
+      if (!assigned || assigned.length === 0) {
+        return res.status(403).json({ success: false, message: 'Forbidden: Pass belongs to another event.' });
+      }
     }
 
     // Calculate dynamic base URL from incoming request

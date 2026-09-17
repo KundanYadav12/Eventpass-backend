@@ -104,6 +104,7 @@ async function getSalesSummary(filters) {
     SELECT
       COUNT(DISTINCT b.id) as total_invoices,
       COALESCE(SUM(b.quantity), 0) as total_passes_sold,
+      COALESCE(SUM(CASE WHEN b.is_complementary = 1 OR b.total_amount = 0 THEN b.quantity ELSE 0 END), 0) as total_complementary_passes,
       COALESCE(SUM(b.subtotal), 0) as total_subtotal,
       COALESCE(SUM(b.gst_amount), 0) as total_gst,
       COALESCE(SUM(b.total_amount), 0) as total_gross_sales,
@@ -139,6 +140,7 @@ async function getSalesSummary(filters) {
   return {
     totalInvoices: Number(summaryRes?.total_invoices || 0),
     totalPassesSold: totalPasses,
+    totalComplementaryPasses: Number(summaryRes?.total_complementary_passes || 0),
     totalSalesAmount: grossSales,
     totalGst: totalGst,
     totalDiscount: 0.00,
@@ -643,6 +645,102 @@ async function exportSalesExcel(filters) {
   return workbook.xlsx.writeBuffer();
 }
 
+/**
+ * Get Cashier-wise Sales & Allocation Performance Breakdown
+ */
+async function getCashierSalesSummary({ eventId = null, dateFrom = null, dateTo = null }) {
+  const whereConditions = [];
+  const queryParams = [];
+
+  if (eventId) {
+    whereConditions.push('ca.event_id = ?');
+    queryParams.push(parseInt(eventId, 10));
+  }
+
+  const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+  // 1. Fetch cashier allocation summaries
+  const allocationRows = await query(
+    `SELECT u.id as cashier_id, u.name as cashier_name, u.email as cashier_email,
+            ca.event_id, e.event_name,
+            COALESCE(SUM(ca.allocated_quantity), 0) as total_allocated,
+            COALESCE(SUM(ca.sold_quantity), 0) as total_sold_via_alloc
+     FROM cashier_allocations ca
+     JOIN users u ON ca.cashier_id = u.id
+     JOIN events e ON ca.event_id = e.id
+     ${whereClause}
+     GROUP BY u.id, u.name, u.email, ca.event_id, e.event_name
+     ORDER BY total_sold_via_alloc DESC, total_allocated DESC`,
+    queryParams
+  );
+
+  // 2. Fetch actual sales metrics from billings table for each cashier
+  const billWhere = [];
+  const billParams = [];
+
+  if (eventId) {
+    billWhere.push('b.event_id = ?');
+    billParams.push(parseInt(eventId, 10));
+  }
+
+  if (dateFrom) {
+    billWhere.push('b.created_at >= ?');
+    billParams.push(`${dateFrom} 00:00:00`);
+  }
+
+  if (dateTo) {
+    billWhere.push('b.created_at <= ?');
+    billParams.push(`${dateTo} 23:59:59`);
+  }
+
+  const billWhereClause = billWhere.length > 0 ? `WHERE ${billWhere.join(' AND ')}` : '';
+
+  const salesMetrics = await query(
+    `SELECT COALESCE(b.cashier_id, b.created_by) as cashier_id,
+            COUNT(b.id) as total_invoices,
+            COALESCE(SUM(b.quantity), 0) as total_sold,
+            COALESCE(SUM(b.total_amount), 0) as total_revenue,
+            COALESCE(AVG(b.unit_price), 0) as avg_price
+     FROM billings b
+     ${billWhereClause}
+     GROUP BY COALESCE(b.cashier_id, b.created_by)`,
+    billParams
+  );
+
+  const salesMap = {};
+  for (const sm of salesMetrics) {
+    if (sm.cashier_id) {
+      salesMap[sm.cashier_id] = sm;
+    }
+  }
+
+  const result = allocationRows.map(row => {
+    const sm = salesMap[row.cashier_id] || { total_invoices: 0, total_sold: 0, total_revenue: 0, avg_price: 0 };
+    const allocated = parseInt(row.total_allocated, 10) || 0;
+    const sold = parseInt(sm.total_sold, 10) || parseInt(row.total_sold_via_alloc, 10) || 0;
+    const remaining = Math.max(0, allocated - sold);
+    const revenue = parseFloat(sm.total_revenue || 0);
+    const avgPrice = sold > 0 ? (revenue / sold) : parseFloat(sm.avg_price || 0);
+
+    return {
+      cashierId: row.cashier_id,
+      cashierName: row.cashier_name,
+      cashierEmail: row.cashier_email,
+      eventId: row.event_id,
+      eventName: row.event_name,
+      allocatedQuantity: allocated,
+      soldQuantity: sold,
+      remainingQuantity: remaining,
+      utilizationRate: allocated > 0 ? Math.round((sold / allocated) * 100) : 0,
+      totalInvoices: sm.total_invoices || 0,
+      totalRevenue: revenue,
+      averageSellingPrice: avgPrice
+    };
+  });
+
+  return result;
+}
+
 module.exports = {
   getSalesSummary,
   getSalesTransactions,
@@ -651,5 +749,6 @@ module.exports = {
   getSalesTrend,
   getPaymentSummary,
   getCustomerSales,
+  getCashierSalesSummary,
   exportSalesExcel
 };

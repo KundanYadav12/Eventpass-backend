@@ -2,7 +2,7 @@ const eventService = require('../services/EventService');
 
 async function getEvents(req, res, next) {
   try {
-    const events = await eventService.getEvents(req.query);
+    const events = await eventService.getEvents(req.query, req.user);
     res.json({
       success: true,
       data: events

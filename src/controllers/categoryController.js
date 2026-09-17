@@ -55,7 +55,8 @@ async function createCategory(req, res, next) {
       renewalTime = '01:00',
       renewalActiveFrom = null,
       renewalActiveUntil = null,
-      price = 0
+      price = 0,
+      minSellingPrice = null
     } = req.body;
 
     const targetEventId = req.effectiveEventId || eventId;
@@ -72,19 +73,20 @@ async function createCategory(req, res, next) {
     const formattedValidUntil = formatMySqlDateTime(validUntil);
     const formattedRenActiveFrom = behavior === 'RENEWABLE' ? (formatMySqlDateTime(renewalActiveFrom) || formattedValidFrom) : null;
     const formattedRenActiveUntil = behavior === 'RENEWABLE' ? (formatMySqlDateTime(renewalActiveUntil) || formattedValidUntil) : null;
+    const parsedMinPrice = minSellingPrice !== null && minSellingPrice !== undefined && minSellingPrice !== '' ? parseFloat(minSellingPrice) : (parseFloat(price) || 0);
 
     const result = await query(
       `INSERT INTO pass_categories (
         event_id, code, category_prefix, name, description,
         valid_from, valid_until, total_quantity, max_daily_scans,
         scan_behavior, renewal_time, renewal_active_from, renewal_active_until,
-        price, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        price, min_selling_price, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
         targetEventId, code.trim().toLowerCase(), categoryPrefix || '', name.trim(), description || '',
         formattedValidFrom, formattedValidUntil, totalQuantity, maxDailyScans,
         behavior, renTime, formattedRenActiveFrom, formattedRenActiveUntil,
-        price
+        price, parsedMinPrice
       ]
     );
 
@@ -95,7 +97,7 @@ async function createCategory(req, res, next) {
       action: 'CREATE_CATEGORY',
       entity: 'PASS_CATEGORY',
       entityId: result.insertId,
-      newValue: { eventId: targetEventId, name, code, validFrom: formattedValidFrom, validUntil: formattedValidUntil, scanBehavior: behavior, renewalTime: renTime },
+      newValue: { eventId: targetEventId, name, code, validFrom: formattedValidFrom, validUntil: formattedValidUntil, scanBehavior: behavior, renewalTime: renTime, price, minSellingPrice: parsedMinPrice },
       ipAddress,
       userAgent
     });
@@ -103,7 +105,7 @@ async function createCategory(req, res, next) {
     res.status(201).json({
       success: true,
       message: 'Category created successfully',
-      data: { id: result.insertId, name, code, eventId: targetEventId, scanBehavior: behavior }
+      data: { id: result.insertId, name, code, eventId: targetEventId, scanBehavior: behavior, minSellingPrice: parsedMinPrice }
     });
   } catch (error) {
     next(error);
@@ -124,7 +126,8 @@ async function updateCategory(req, res, next) {
       renewalTime,
       renewalActiveFrom,
       renewalActiveUntil,
-      price
+      price,
+      minSellingPrice
     } = req.body;
 
     const ipAddress = req.ip || req.connection.remoteAddress;
@@ -149,6 +152,9 @@ async function updateCategory(req, res, next) {
     const formattedRenActiveUntil = behavior === 'RENEWABLE'
       ? (renewalActiveUntil !== undefined ? formatMySqlDateTime(renewalActiveUntil) : (oldVal.renewal_active_until || formattedValidUntil))
       : null;
+    const parsedMinPrice = minSellingPrice !== undefined
+      ? (minSellingPrice !== null && minSellingPrice !== '' ? parseFloat(minSellingPrice) : 0)
+      : oldVal.min_selling_price;
 
     await query(
       `UPDATE pass_categories
@@ -163,12 +169,13 @@ async function updateCategory(req, res, next) {
            renewal_active_from = ?,
            renewal_active_until = ?,
            price = COALESCE(?, price),
+           min_selling_price = ?,
            updated_at = NOW()
        WHERE id = ?`,
       [
         name, categoryPrefix, description, formattedValidFrom, formattedValidUntil, maxDailyScans,
         behavior, renTime, formattedRenActiveFrom, formattedRenActiveUntil,
-        price, id
+        price, parsedMinPrice, id
       ]
     );
 

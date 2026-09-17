@@ -130,6 +130,24 @@ async function exportSalesExcel(req, res, next) {
   }
 }
 
+async function getCashierSalesSummary(req, res, next) {
+  try {
+    const eventId = req.effectiveEventId || req.query.eventId || null;
+    const { dateFrom, dateTo } = req.query;
+    const data = await salesReportService.getCashierSalesSummary({
+      eventId,
+      dateFrom,
+      dateTo
+    });
+    res.json({
+      success: true,
+      data
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   getSalesSummary,
   getSalesTransactions,
@@ -138,5 +156,6 @@ module.exports = {
   getSalesTrend,
   getPaymentSummary,
   getCustomerSales,
+  getCashierSalesSummary,
   exportSalesExcel
 };

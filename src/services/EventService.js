@@ -2,7 +2,7 @@ const { query } = require('../config/db');
 const { logAudit } = require('./AuditService');
 const { formatMySqlDateTime } = require('../utils/timeUtil');
 
-async function getEvents({ status = '', search = '' } = {}) {
+async function getEvents({ status = '', search = '' } = {}, user = null) {
   const whereConditions = [];
   const queryParams = [];
 
@@ -15,6 +15,21 @@ async function getEvents({ status = '', search = '' } = {}) {
     whereConditions.push('(e.event_name LIKE ? OR e.event_code LIKE ? OR e.venue LIKE ?)');
     const s = `%${search.trim()}%`;
     queryParams.push(s, s, s);
+  }
+
+  // Non-SuperAdmins can only see events assigned to them
+  if (user && user.role !== 'SUPERADMIN') {
+    if (user.role === 'SCANNER' || user.roleId === 4) {
+      whereConditions.push('e.id = ?');
+      queryParams.push(user.eventId || -1);
+    } else {
+      whereConditions.push(`(
+        e.id IN (SELECT event_id FROM user_assigned_events WHERE user_id = ?)
+        OR e.id IN (SELECT event_id FROM admin_event_permissions WHERE user_id = ?)
+        OR e.id = ?
+      )`);
+      queryParams.push(user.id, user.id, user.eventId || -1);
+    }
   }
 
   const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';

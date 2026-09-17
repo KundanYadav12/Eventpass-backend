@@ -5,7 +5,7 @@ dotenv.config();
 const JWT_SECRET = process.env.JWT_SECRET || 'eventgen_fallback_secret_key_access_2026';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'eventgen_fallback_secret_key_refresh_2026';
 const ACCESS_TOKEN_EXPIRY = process.env.JWT_EXPIRES_IN || '2h';
-const REFRESH_TOKEN_EXPIRY = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+const REFRESH_TOKEN_EXPIRY = process.env.JWT_REFRESH_EXPIRES_IN || '30d';
 
 function generateAccessToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });

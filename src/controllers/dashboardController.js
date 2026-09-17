@@ -94,6 +94,15 @@ async function getDashboardStats(req, res, next) {
       if (eventRows.length > 0) currentEvent = eventRows[0];
     }
 
+    // Fraud detection summary
+    const [fraudSummary] = await query(
+      `SELECT COUNT(*) as total_fraud,
+              SUM(CASE WHEN DATE(detected_at) = CURRENT_DATE() THEN 1 ELSE 0 END) as today_fraud
+       FROM fraud_detections
+       ${eventId ? 'WHERE event_id = ?' : ''}`,
+      eventParams
+    );
+
     res.json({
       success: true,
       currentEvent,
@@ -107,7 +116,9 @@ async function getDashboardStats(req, res, next) {
         totalVoid: passSummary?.total_void || 0,
         todayScans: todayStats?.total_scans_today || 0,
         successfulScansToday: todayStats?.successful_scans_today || 0,
-        failedScansToday: todayStats?.failed_scans_today || 0
+        failedScansToday: todayStats?.failed_scans_today || 0,
+        totalFraudDetections: fraudSummary?.total_fraud || 0,
+        todayFraudDetections: fraudSummary?.today_fraud || 0
       },
       categoryStats,
       scansByDevice,

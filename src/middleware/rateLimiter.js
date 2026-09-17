@@ -24,12 +24,13 @@ const authLimiter = rateLimit({
   }
 });
 
-// High-throughput limiter for Gate Scanner endpoints
+// High-throughput limiter for Gate Scanner endpoints (supporting rapid burst & continuous scanning)
 const scanLimiter = rateLimit({
   windowMs: 1000, // 1 second
-  max: 30, // 30 scans per second per device/IP
+  max: 200, // 200 scans per second per device/IP
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => Boolean(req.headers.authorization || req.user || req.body?.deviceId),
   message: {
     success: false,
     result: 'rate_limited',

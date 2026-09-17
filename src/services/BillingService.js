@@ -63,6 +63,7 @@ async function issuePassesAndBill({
   gstMode = 'INCLUDED',
   gstRate = 18,
   includePassCodeOnBill = true,
+  isComplementary = false,
   sendVia = 'NONE',
   senderName = '',
   senderEmail = '',
@@ -102,12 +103,12 @@ async function issuePassesAndBill({
   }
 
   // Determine pricing & calculate GST
-  const finalUnitPrice = unitPrice !== null && unitPrice !== undefined ? parseFloat(unitPrice) : parseFloat(category.price || 0);
+  const finalUnitPrice = isComplementary ? 0 : (unitPrice !== null && unitPrice !== undefined ? parseFloat(unitPrice) : parseFloat(category.price || 0));
   const calc = calculateGst({
     unitPrice: finalUnitPrice,
     quantity,
-    gstMode,
-    gstRate
+    gstMode: isComplementary ? 'OFF' : gstMode,
+    gstRate: isComplementary ? 0 : gstRate
   });
 
   const isShared = sendVia && sendVia !== 'NONE';
@@ -124,9 +125,9 @@ async function issuePassesAndBill({
       `INSERT INTO billings (
         bill_number, download_token, event_id, category_id, style_id, customer_name, customer_email,
         customer_phone, sponsor_name, quantity, unit_price, subtotal, gst_mode,
-        gst_rate, gst_amount, total_amount, include_pass_code_on_bill, sent_via,
+        gst_rate, gst_amount, total_amount, is_complementary, include_pass_code_on_bill, sent_via,
         created_by, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
         billNumber,
         downloadToken,
@@ -144,6 +145,7 @@ async function issuePassesAndBill({
         calc.gstRate,
         calc.gstAmount,
         calc.totalAmount,
+        (isComplementary || calc.totalAmount === 0) ? 1 : 0,
         includePassCodeOnBill ? 1 : 0,
         sendVia,
         userId

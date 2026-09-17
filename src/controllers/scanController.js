@@ -6,8 +6,11 @@ const { query } = require('../config/db');
  */
 async function scan(req, res, next) {
   try {
-    const { code, deviceId = 'GATE-01' } = req.body;
+    const { code, deviceId = 'GATE-01', targetEventId = null, checkpointId = null } = req.body;
     const operatorId = req.user?.id || null;
+    const operatorName = req.user?.name || null;
+    const operatorRole = req.user?.role || null;
+    const operatorEventId = req.user?.eventId || null;
     const ipAddress = req.ip || req.connection.remoteAddress;
 
     if (!code) {
@@ -18,10 +21,21 @@ async function scan(req, res, next) {
       });
     }
 
+    // Strictly lock SCANNER accounts to their assigned event
+    const isScanner = operatorRole === 'SCANNER' || req.user?.roleId === 4;
+    const resolvedTargetEventId = isScanner
+      ? operatorEventId
+      : (targetEventId || req.effectiveEventId || null);
+
     const result = await scanService.processScan({
       code,
       deviceId,
       operatorId,
+      operatorName,
+      operatorRole,
+      operatorEventId,
+      targetEventId: resolvedTargetEventId,
+      checkpointId: checkpointId ? parseInt(checkpointId, 10) : null,
       ipAddress
     });
 
@@ -36,7 +50,10 @@ async function scan(req, res, next) {
  */
 async function getScanHistory(req, res, next) {
   try {
-    const eventId = req.effectiveEventId || req.query.eventId;
+    let eventId = req.effectiveEventId || req.query.eventId;
+    if (req.user?.role === 'SCANNER' || req.user?.roleId === 4) {
+      eventId = req.user.eventId;
+    }
     const {
       page = 1,
       limit = 20,
@@ -44,6 +61,7 @@ async function getScanHistory(req, res, next) {
       result = '',
       passType = '',
       deviceId = '',
+      checkpointId = '',
       dateFrom = '',
       dateTo = ''
     } = req.query;
@@ -58,6 +76,11 @@ async function getScanHistory(req, res, next) {
     if (eventId) {
       whereConditions.push('sh.event_id = ?');
       queryParams.push(parseInt(eventId, 10));
+    }
+
+    if (checkpointId && checkpointId !== 'all') {
+      whereConditions.push('sh.checkpoint_id = ?');
+      queryParams.push(parseInt(checkpointId, 10));
     }
 
     if (search && search.trim()) {
@@ -103,11 +126,13 @@ async function getScanHistory(req, res, next) {
     const totalPages = Math.ceil(totalRecords / pageLimit);
 
     const history = await query(
-      `SELECT sh.*, u.name as operator_name, c.name as category_name, e.event_name
+      `SELECT sh.*, u.name as operator_name, c.name as category_name, e.event_name,
+              sc.name as checkpoint_name, sc.code as checkpoint_code
        FROM scan_history sh
        LEFT JOIN users u ON sh.operator_id = u.id
        LEFT JOIN pass_categories c ON sh.category_id = c.id
        LEFT JOIN events e ON sh.event_id = e.id
+       LEFT JOIN scan_checkpoints sc ON sh.checkpoint_id = sc.id
        ${whereClause}
        ORDER BY sh.scan_time DESC
        LIMIT ? OFFSET ?`,
@@ -135,7 +160,24 @@ async function getScanHistory(req, res, next) {
   }
 }
 
+/**
+ * Get Fraud Detections Summary and Recent Fraud Logs
+ */
+async function getFraudStats(req, res, next) {
+  try {
+    const eventId = req.effectiveEventId || req.query.eventId || null;
+    const stats = await scanService.getFraudStats({ eventId });
+    res.json({
+      success: true,
+      ...stats
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   scan,
-  getScanHistory
+  getScanHistory,
+  getFraudStats
 };
