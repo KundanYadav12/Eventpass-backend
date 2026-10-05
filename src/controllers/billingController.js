@@ -282,10 +282,18 @@ async function downloadPassPdfByToken(req, res, next) {
       return res.status(400).json({ success: false, message: 'Download token is required' });
     }
 
-    const billings = await query(
+    let billings = await query(
       'SELECT * FROM billings WHERE download_token = ? OR id = ?',
       [token, /^\d+$/.test(token) ? parseInt(token, 10) : 0]
     );
+
+    if (!billings || billings.length === 0) {
+      // Fallback: check if token matches a pass code directly
+      const passByCode = await query('SELECT * FROM passes WHERE code = ?', [String(token).trim().toUpperCase()]);
+      if (passByCode && passByCode.length > 0 && passByCode[0].billing_id) {
+        billings = await query('SELECT * FROM billings WHERE id = ?', [passByCode[0].billing_id]);
+      }
+    }
 
     if (!billings || billings.length === 0) {
       return res.status(404).json({ success: false, message: 'Download link is invalid or expired' });

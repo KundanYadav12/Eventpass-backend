@@ -28,6 +28,7 @@ const auditController = require('../controllers/auditController');
 const systemController = require('../controllers/systemController');
 const profileController = require('../controllers/profileController');
 const databaseController = require('../controllers/databaseController');
+const selfRegistrationController = require('../controllers/selfRegistrationController');
 
 // 1. Health Check & Platform Settings
 router.get('/health', (req, res) => {
@@ -110,7 +111,20 @@ router.get('/billing/download/bill/:token', billingController.downloadBillPdfByT
 router.get('/billing/:id/download-pass', billingController.downloadPassPdfByToken);
 router.get('/billing/:id/download-bill', billingController.downloadBillPdfByToken);
 
-// 10. Sales Report Module Routes (Protected with RBAC 'sales.view' permission & event scoping)
+// 10. Self Registration Routes (Public Attendee Registration & Admin Management)
+// Public Customer Self Registration (No login needed — secured by unguessable cryptographic token & rate limited)
+router.get('/public/self-registration/:token', selfRegistrationController.getPublicConfig);
+router.post('/public/self-registration/:token/register', authLimiter, selfRegistrationController.submitRegistration);
+
+// Admin Self Registration Management
+router.get('/self-registrations', authenticateToken, scopeEventAccess, selfRegistrationController.getAll);
+router.post('/self-registrations', authenticateToken, scopeEventAccess, requirePermission(['self_registration.manage', 'passes.generate', 'billing.create', 'events.manage']), selfRegistrationController.create);
+router.get('/self-registrations/:id', authenticateToken, scopeEventAccess, selfRegistrationController.getById);
+router.put('/self-registrations/:id', authenticateToken, scopeEventAccess, requirePermission(['self_registration.manage', 'passes.generate', 'billing.create', 'events.manage']), selfRegistrationController.update);
+router.put('/self-registrations/:id/status', authenticateToken, scopeEventAccess, requirePermission(['self_registration.manage', 'passes.generate', 'billing.create', 'events.manage']), selfRegistrationController.toggleStatus);
+router.get('/self-registrations/:id/attendees', authenticateToken, scopeEventAccess, selfRegistrationController.getAttendees);
+
+// 11. Sales Report Module Routes (Protected with RBAC 'sales.view' permission & event scoping)
 router.get('/sales/summary', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.getSalesSummary);
 router.get('/sales/transactions', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.getSalesTransactions);
 router.get('/sales/categories', authenticateToken, scopeEventAccess, requirePermission('sales.view'), salesController.getCategorySales);

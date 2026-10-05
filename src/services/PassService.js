@@ -163,7 +163,7 @@ async function getPasses({
            p.valid_from, p.valid_until, p.issued_at, p.first_scanned_at, p.last_scanned_at,
            p.scan_count, p.printed, p.print_batch_id, p.billing_id, p.style_id,
            p.customer_name, p.customer_email, p.customer_phone, p.sponsor_name,
-           p.sharing_method, p.first_shared_at, p.last_shared_at, p.reshare_count, p.shared_by,
+           p.sharing_method, p.source, p.self_registration_id, p.first_shared_at, p.last_shared_at, p.reshare_count, p.shared_by,
            p.created_at, p.updated_at,
            c.name as category_name, c.price as category_price,
            e.event_name, e.event_code,
