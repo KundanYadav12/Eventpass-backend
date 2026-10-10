@@ -393,6 +393,14 @@ async function resendBillingDelivery(req, res, next) {
     }
     const billing = billings[0];
 
+    const isCashier = req.user?.role === 'CASHIER' || req.user?.role_id === 3;
+    if (isCashier) {
+      const cashierEventId = req.user?.eventId || req.effectiveEventId;
+      if (billing.cashier_id && billing.cashier_id !== req.user.id && (!cashierEventId || billing.event_id !== cashierEventId)) {
+        return res.status(403).json({ success: false, message: 'You are not authorized to resend delivery for this sale' });
+      }
+    }
+
     const passes = await query('SELECT * FROM passes WHERE billing_id = ? ORDER BY id ASC', [id]);
     if (!passes || passes.length === 0) {
       return res.status(404).json({ success: false, message: 'No passes associated with this billing' });
@@ -528,7 +536,9 @@ async function resendBillingDelivery(req, res, next) {
       message: 'Delivery retry processed successfully',
       emailDelivery,
       whatsappDelivery,
-      whatsappUrl: whatsappDelivery.whatsappUrl || null
+      whatsappUrl: whatsappDelivery.whatsappUrl || null,
+      passPdfBase64: multiPassPdfBuffer.toString('base64'),
+      billPdfBase64: billPdfBuffer.toString('base64')
     });
   } catch (error) {
     next(error);

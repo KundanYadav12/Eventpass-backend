@@ -51,10 +51,11 @@ async function sellPass(req, res, next) {
       baseUrl
     });
 
-    res.json({
+    res.status(201).json({
       success: true,
       message: `Sale successful (${result.quantity} pass${result.quantity > 1 ? 'es' : ''} sold)`,
-      sale: result
+      sale: result,
+      data: result
     });
   } catch (error) {
     if (
@@ -63,7 +64,9 @@ async function sellPass(req, res, next) {
       error.message.includes('Selling price') ||
       error.message.includes('Insufficient') ||
       error.message.includes('allocation') ||
-      error.message.includes('required')
+      error.message.includes('required') ||
+      error.message.includes('valid') ||
+      error.message.includes('Invalid')
     ) {
       return res.status(400).json({
         success: false,

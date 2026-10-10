@@ -2,7 +2,7 @@ const { query, withTransaction } = require('../config/db');
 const { generatePassCode, generateHmacSignature, generateSecureToken } = require('../utils/cryptoUtil');
 const { calculateGst } = require('./BillingService');
 const { logAudit } = require('./AuditService');
-const { generatePassPdf, generateBillPdf } = require('./pdfService');
+const { generatePassPdf, generateMultiPassPdf, generateBillPdf } = require('./pdfService');
 const eventDeliveryService = require('./eventDeliveryService');
 const { formatDateTimeIST, formatDateIST } = require('../utils/timeUtil');
 const ExcelJS = require('exceljs');
@@ -34,6 +34,40 @@ async function sellPasses({
   const qty = Math.max(1, parseInt(quantity, 10) || 1);
   if (!cashierId || !eventId || !categoryId || !customerName || !customerName.trim()) {
     throw new Error('Cashier ID, Event ID, Category ID, and Customer Name are required');
+  }
+
+  // Validate dispatch requirements
+  const normalizedSendVia = (sendVia || 'NONE').toUpperCase();
+  if (normalizedSendVia === 'EMAIL' || normalizedSendVia === 'BOTH') {
+    if (!customerEmail || !customerEmail.trim()) {
+      throw new Error('Customer email is required when Email dispatch is selected');
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(customerEmail.trim())) {
+      throw new Error('A valid customer email address is required for Email dispatch');
+    }
+  }
+
+  if (normalizedSendVia === 'WHATSAPP' || normalizedSendVia === 'BOTH') {
+    if (!customerPhone || !customerPhone.trim()) {
+      throw new Error('Customer mobile number is required when WhatsApp dispatch is selected');
+    }
+    const digitsOnly = customerPhone.replace(/[^0-9]/g, '');
+    if (digitsOnly.length < 10) {
+      throw new Error('A valid mobile number (at least 10 digits) is required for WhatsApp dispatch');
+    }
+  }
+
+  // Normalize phone number (prepending +91 for standard 10-digit Indian numbers)
+  if (customerPhone && customerPhone.trim()) {
+    const digits = customerPhone.replace(/[^0-9]/g, '');
+    if (digits.length === 10 && /^[6-9]/.test(digits)) {
+      customerPhone = `+91${digits}`;
+    } else {
+      customerPhone = customerPhone.trim();
+    }
+  } else {
+    customerPhone = null;
   }
 
   // 1. Fetch user to verify active Cashier status & event assignment
@@ -293,74 +327,137 @@ async function sellPasses({
     };
   });
 
-  // 5. Asynchronous / Background Customer Delivery (Pass & Bill PDF generation for customer delivery only)
-  if (isShared && (customerEmail || customerPhone)) {
-    try {
-      const billingRecord = {
-        id: saleResult.billingId,
-        bill_number: saleResult.billNumber,
-        customer_name: customerName,
-        customer_email: customerEmail,
-        customer_phone: customerPhone,
-        sponsor_name: sponsorName,
-        quantity: calc.quantity,
-        unit_price: calc.unitPrice,
-        subtotal: calc.subtotal,
-        gst_mode: calc.gstMode,
-        gst_rate: calc.gstRate,
-        gst_amount: calc.gstAmount,
-        total_amount: calc.totalAmount,
-        include_pass_code_on_bill: true,
-        created_at: new Date()
-      };
+  // 5. Generate PDFs & Dispatch Delivery via Email and/or WhatsApp
+  const billingRecord = {
+    id: saleResult.billingId,
+    bill_number: saleResult.billNumber,
+    customer_name: customerName,
+    customer_email: customerEmail,
+    customer_phone: customerPhone,
+    sponsor_name: sponsorName,
+    quantity: calc.quantity,
+    unit_price: calc.unitPrice,
+    subtotal: calc.subtotal,
+    gst_mode: calc.gstMode,
+    gst_rate: calc.gstRate,
+    gst_amount: calc.gstAmount,
+    total_amount: calc.totalAmount,
+    include_pass_code_on_bill: true,
+    created_at: new Date()
+  };
 
-      const passPdfs = await Promise.all(
-        saleResult.createdPasses.map(async (pass) => {
-          const buffer = await generatePassPdf({
-            style: saleResult.style,
-            pass,
-            event: saleResult.event,
-            category: saleResult.category,
-            customer: { name: customerName, email: customerEmail, phone: customerPhone },
-            sponsor: sponsorName
-          });
-          return { pass, code: pass.code, filename: `Pass_${pass.code}.pdf`, buffer };
-        })
-      );
-
-      const billPdfBuffer = await generateBillPdf({
-        billing: billingRecord,
+  const passPdfs = await Promise.all(
+    saleResult.createdPasses.map(async (pass) => {
+      const buffer = await generatePassPdf({
+        style: saleResult.style,
+        pass,
         event: saleResult.event,
         category: saleResult.category,
-        passes: saleResult.createdPasses
+        customer: { name: customerName, email: customerEmail, phone: customerPhone },
+        sponsor: sponsorName
       });
+      return { pass, code: pass.code, filename: `Pass_${pass.code}.pdf`, buffer };
+    })
+  );
 
-      // Dispatch delivery asynchronously
-      eventDeliveryService.dispatchBillingDelivery({
-        eventId,
-        billingId: saleResult.billingId,
-        billNumber: saleResult.billNumber,
-        downloadToken: saleResult.downloadToken,
-        customerName,
-        customerEmail,
-        customerPhone,
-        sendVia,
-        senderName,
-        senderEmail,
-        emailSubject,
-        passPdfs,
-        billPdfBuffer,
-        baseUrl
-      }).catch(err => console.warn('[Cashier Delivery Warning]:', err.message));
-    } catch (deliveryErr) {
-      console.warn('[Cashier Delivery Prep Warning]:', deliveryErr.message);
-    }
+  const multiPassPdfBuffer = await generateMultiPassPdf({
+    style: saleResult.style,
+    passes: saleResult.createdPasses,
+    event,
+    category,
+    customer: { name: customerName, email: customerEmail, phone: customerPhone },
+    sponsor: sponsorName
+  });
+
+  const billPdfBuffer = await generateBillPdf({
+    billing: billingRecord,
+    event: saleResult.event,
+    category: saleResult.category,
+    passes: saleResult.createdPasses
+  });
+
+  let emailDelivery = { success: false, status: 'NOT_REQUESTED' };
+  if ((sendVia === 'EMAIL' || sendVia === 'BOTH') && customerEmail) {
+    const subject = emailSubject || `${event.event_name} — Your Official Entry Pass & Invoice (${saleResult.billNumber})`;
+
+    const emailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1E293B; line-height: 1.6;">
+        <div style="background-color: #0F172A; padding: 24px; text-align: center; border-radius: 8px 8px 0 0;">
+          <h1 style="color: #FFFFFF; margin: 0; font-size: 22px;">${event.event_name}</h1>
+          <p style="color: #94A3B8; margin: 6px 0 0 0; font-size: 13px;">Official Pass Confirmation & Tax Invoice</p>
+        </div>
+        <div style="padding: 24px; border: 1px solid #E2E8F0; border-top: none; background-color: #FFFFFF; border-radius: 0 0 8px 8px;">
+          <p>Dear <strong>${customerName}</strong>,</p>
+          <p>Thank you for purchasing your pass for <strong>${event.event_name}</strong>! All <strong>${calc.quantity}</strong> entry pass(es) and your itemized tax invoice are attached to this email.</p>
+          
+          <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 16px; margin: 20px 0;">
+            <table style="width: 100%; font-size: 13.5px;">
+              <tr><td style="color: #64748B;">Category:</td><td><strong>${category.name}</strong></td></tr>
+              <tr><td style="color: #64748B;">Pass Code(s):</td><td style="font-family: monospace; font-weight: bold; color: #2563EB;">${saleResult.createdPasses.map(p => p.code).join(', ')}</td></tr>
+              <tr><td style="color: #64748B;">Quantity:</td><td><strong>${calc.quantity} pass(es)</strong></td></tr>
+              <tr><td style="color: #64748B;">Total Amount:</td><td><strong style="color: #047857;">₹${calc.totalAmount.toFixed(2)}</strong></td></tr>
+              ${sponsorName ? `<tr><td style="color: #64748B;">Sponsor:</td><td>${sponsorName}</td></tr>` : ''}
+            </table>
+          </div>
+
+          <p style="font-size: 13px; color: #64748B;">
+            <strong>Important:</strong> Please download and present the attached Pass PDF(s) with scannable barcodes at the entrance gate for instant entry.
+          </p>
+
+          <hr style="border: none; border-top: 1px solid #E2E8F0; margin: 24px 0;" />
+          <p style="font-size: 11.5px; color: #94A3B8; text-align: center;">
+            ${event.event_name} • ${event.venue || 'Event Venue'}<br />
+            This is an automated pass confirmation.
+          </p>
+        </div>
+      </div>
+    `;
+
+    const passAttachments = passPdfs.map(item => ({
+      filename: item.filename,
+      content: item.buffer,
+      contentType: 'application/pdf'
+    }));
+
+    emailDelivery = await eventDeliveryService.sendEventEmail({
+      eventId,
+      billingId: saleResult.billingId,
+      to: customerEmail,
+      subject,
+      html: emailHtml,
+      attachments: [
+        ...passAttachments,
+        {
+          filename: `Invoice_${saleResult.billNumber}.pdf`,
+          content: billPdfBuffer,
+          contentType: 'application/pdf'
+        }
+      ]
+    });
   }
 
-  // 6. Return STRICTLY SANITIZED response to Cashier (No pass codes, no HMACs, no pass PDF download tokens)
+  let whatsappDelivery = { success: false, status: 'NOT_REQUESTED' };
+  if (sendVia === 'WHATSAPP' || sendVia === 'BOTH') {
+    whatsappDelivery = await eventDeliveryService.generateEventWhatsappDelivery({
+      eventId,
+      customerPhone,
+      customerName,
+      eventName: event.event_name,
+      passCodes: saleResult.createdPasses.map(p => p.code),
+      totalAmount: calc.totalAmount,
+      billingId: saleResult.billingId,
+      downloadToken: saleResult.downloadToken,
+      baseUrl: baseUrl || null,
+      passPdfBuffer: multiPassPdfBuffer,
+      billPdfBuffer
+    });
+  }
+
+  // 6. Return comprehensive response to Cashier with delivery details and PDF assets
   return {
     billingId: saleResult.billingId,
     billNumber: saleResult.billNumber,
+    downloadToken: saleResult.downloadToken,
     customerName,
     customerEmail,
     customerPhone,
@@ -372,6 +469,18 @@ async function sellPasses({
     gstAmount: saleResult.gstAmount,
     totalAmount: saleResult.totalAmount,
     remainingAllocation: saleResult.remainingAllocation,
+    sendVia,
+    emailSent: emailDelivery.status === 'SENT' || emailDelivery.simulated === true,
+    emailDelivery,
+    whatsappUrl: whatsappDelivery.whatsappUrl || null,
+    whatsappDelivery,
+    passPdfBase64: multiPassPdfBuffer.toString('base64'),
+    billPdfBase64: billPdfBuffer.toString('base64'),
+    passPdfs: passPdfs.map(p => ({
+      code: p.code,
+      filename: p.filename,
+      base64: p.buffer.toString('base64')
+    })),
     soldAt: new Date().toISOString(),
     soldAtIST: formatDateTimeIST(new Date())
   };
@@ -442,7 +551,7 @@ async function getMySales({
 
   // Paginated records
   const sales = await query(
-    `SELECT b.id, b.bill_number, b.customer_name, b.customer_email, b.customer_phone,
+    `SELECT b.id, b.bill_number, b.download_token, b.customer_name, b.customer_email, b.customer_phone,
             b.quantity, b.unit_price, b.subtotal, b.gst_amount, b.total_amount,
             b.sent_via, b.created_at,
             pc.name as category_name, pc.code as category_code,
@@ -466,6 +575,7 @@ async function getMySales({
     sales: sales.map(s => ({
       id: s.id,
       billNumber: s.bill_number,
+      downloadToken: s.download_token,
       customerName: s.customer_name,
       customerEmail: s.customer_email,
       customerPhone: s.customer_phone,

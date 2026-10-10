@@ -325,10 +325,29 @@ async function sendEventEmail({
     return { success: false, status: 'DISABLED', message: 'Email delivery disabled for this event' };
   }
 
-  const fromAddress = `"${settings.sender_name || 'Event Operations'}" <${settings.sender_email}>`;
+  // If event settings have a mock password or no password, but system .env has live SMTP, use system fallback!
+  const systemUser = (process.env.EMAIL_USER || process.env.SMTP_USER || '').trim();
+  const systemPass = (process.env.EMAIL_PASS || process.env.SMTP_PASS || '').replace(/\s+/g, '');
+  const hasSystemSmtp = Boolean(systemUser && systemPass && !systemPass.startsWith('mock_'));
 
-  // Only mock if password is not configured or explicitly starts with 'mock_'
-  const isMock = !settings.smtp_pass || settings.smtp_pass.startsWith('mock_');
+  const effectiveSettings = { ...settings };
+  const isEventMock = !settings.smtp_pass || settings.smtp_pass.startsWith('mock_') || (settings.smtp_host && (settings.smtp_host.includes('musicfest-mail.com') || settings.smtp_host.includes('corporateexpo.com')));
+
+  if (isEventMock && hasSystemSmtp) {
+    console.log(`[Event Email Service] Event #${eventId} falling back to live system SMTP (${systemUser})`);
+    effectiveSettings.smtp_host = process.env.SMTP_HOST || 'smtp.gmail.com';
+    effectiveSettings.smtp_port = parseInt(process.env.SMTP_PORT || '587', 10);
+    effectiveSettings.smtp_secure = process.env.SMTP_SECURE === 'true' || effectiveSettings.smtp_port === 465;
+    effectiveSettings.smtp_user = systemUser;
+    effectiveSettings.smtp_pass = systemPass;
+    effectiveSettings.sender_email = systemUser;
+  }
+
+  const senderUser = effectiveSettings.smtp_user || effectiveSettings.sender_email;
+  const fromAddress = `"${effectiveSettings.sender_name || 'Event Operations'}" <${senderUser}>`;
+
+  // Only mock if neither event nor system has configured password
+  const isMock = !effectiveSettings.smtp_pass || effectiveSettings.smtp_pass.startsWith('mock_');
 
   if (isMock) {
     console.log(`[Event Email Preview] (Simulation) Event #${eventId} From: ${fromAddress} | To: ${to} | Subject: ${subject}`);
@@ -351,7 +370,7 @@ async function sendEventEmail({
   }
 
   try {
-    const transporter = createEventTransporter(settings);
+    const transporter = createEventTransporter(effectiveSettings);
     const info = await transporter.sendMail({
       from: fromAddress,
       to,
@@ -581,7 +600,10 @@ async function generateEventWhatsappDelivery({
     .replace(/{passPdfUrl}/g, passPdfUrl)
     .replace(/{billPdfUrl}/g, billPdfUrl);
 
-  const cleanPhone = (customerPhone || '').replace(/[^0-9]/g, '');
+  let cleanPhone = (customerPhone || '').replace(/[^0-9]/g, '');
+  if (cleanPhone.length === 10 && /^[6-9]/.test(cleanPhone)) {
+    cleanPhone = `91${cleanPhone}`;
+  }
   const encodedText = encodeURIComponent(message);
   const whatsappUrl = `https://api.whatsapp.com/send?phone=${cleanPhone}&text=${encodedText}`;
 
@@ -602,6 +624,107 @@ async function generateEventWhatsappDelivery({
   };
 }
 
+/**
+ * High-level helper to dispatch billing delivery via Email and/or WhatsApp
+ */
+async function dispatchBillingDelivery({
+  eventId,
+  billingId,
+  billNumber,
+  downloadToken,
+  customerName,
+  customerEmail,
+  customerPhone,
+  sendVia = 'NONE',
+  senderName,
+  senderEmail,
+  emailSubject,
+  passPdfs = [],
+  multiPassPdfBuffer,
+  billPdfBuffer,
+  baseUrl
+}) {
+  let emailDelivery = { success: false, status: 'NOT_REQUESTED' };
+  let whatsappDelivery = { success: false, status: 'NOT_REQUESTED' };
+
+  const eventRows = await query('SELECT event_name, venue FROM events WHERE id = ?', [eventId]);
+  const event = eventRows?.[0] || { event_name: 'Event 2026', venue: 'Event Venue' };
+
+  if ((sendVia === 'EMAIL' || sendVia === 'BOTH') && customerEmail) {
+    const subject = emailSubject || `${event.event_name} — Your Official Entry Pass & Invoice (${billNumber})`;
+
+    const emailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1E293B; line-height: 1.6;">
+        <div style="background-color: #0F172A; padding: 24px; text-align: center; border-radius: 8px 8px 0 0;">
+          <h1 style="color: #FFFFFF; margin: 0; font-size: 22px;">${event.event_name}</h1>
+          <p style="color: #94A3B8; margin: 6px 0 0 0; font-size: 13px;">Official Pass Confirmation & Tax Invoice</p>
+        </div>
+        <div style="padding: 24px; border: 1px solid #E2E8F0; border-top: none; background-color: #FFFFFF; border-radius: 0 0 8px 8px;">
+          <p>Dear <strong>${customerName}</strong>,</p>
+          <p>Thank you for purchasing your pass for <strong>${event.event_name}</strong>! Your entry pass(es) and itemized tax invoice are attached to this email.</p>
+          
+          <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 16px; margin: 20px 0;">
+            <table style="width: 100%; font-size: 13.5px;">
+              <tr><td style="color: #64748B;">Pass Code(s):</td><td style="font-family: monospace; font-weight: bold; color: #2563EB;">${passPdfs.map(p => p.code).join(', ')}</td></tr>
+              <tr><td style="color: #64748B;">Quantity:</td><td><strong>${passPdfs.length} pass(es)</strong></td></tr>
+            </table>
+          </div>
+
+          <p style="font-size: 13px; color: #64748B;">
+            <strong>Important:</strong> Please download and present the attached Pass PDF(s) with scannable barcodes at the entrance gate for instant entry.
+          </p>
+
+          <hr style="border: none; border-top: 1px solid #E2E8F0; margin: 24px 0;" />
+          <p style="font-size: 11.5px; color: #94A3B8; text-align: center;">
+            ${event.event_name} • ${event.venue || 'Event Venue'}<br />
+            This is an automated pass confirmation.
+          </p>
+        </div>
+      </div>
+    `;
+
+    const passAttachments = passPdfs.map(item => ({
+      filename: item.filename,
+      content: item.buffer,
+      contentType: 'application/pdf'
+    }));
+
+    emailDelivery = await sendEventEmail({
+      eventId,
+      billingId,
+      to: customerEmail,
+      subject,
+      html: emailHtml,
+      attachments: [
+        ...passAttachments,
+        ...(billPdfBuffer ? [{
+          filename: `Invoice_${billNumber}.pdf`,
+          content: billPdfBuffer,
+          contentType: 'application/pdf'
+        }] : [])
+      ]
+    });
+  }
+
+  if ((sendVia === 'WHATSAPP' || sendVia === 'BOTH') && customerPhone) {
+    whatsappDelivery = await generateEventWhatsappDelivery({
+      eventId,
+      customerPhone,
+      customerName,
+      eventName: event.event_name,
+      passCodes: passPdfs.map(p => p.code),
+      totalAmount: 0,
+      billingId,
+      downloadToken,
+      baseUrl,
+      passPdfBuffer: multiPassPdfBuffer,
+      billPdfBuffer
+    });
+  }
+
+  return { emailDelivery, whatsappDelivery };
+}
+
 module.exports = {
   getEventEmailSettings,
   saveEventEmailSettings,
@@ -609,5 +732,6 @@ module.exports = {
   saveEventWhatsappSettings,
   sendEventEmail,
   testEventEmail,
-  generateEventWhatsappDelivery
+  generateEventWhatsappDelivery,
+  dispatchBillingDelivery
 };

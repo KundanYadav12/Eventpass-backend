@@ -100,7 +100,7 @@ router.delete('/pass-styles/:id', authenticateToken, scopeEventAccess, requirePe
 // 9. Customer Billing & Pass Issuance Routes
 router.post('/billing/preview', authenticateToken, scopeEventAccess, requirePermission('billing.create'), billingController.previewBilling);
 router.post('/billing/issue-and-send', authenticateToken, scopeEventAccess, requirePermission('billing.create'), billingController.issuePassesAndBill);
-router.post('/billing/:id/resend-delivery', authenticateToken, scopeEventAccess, requirePermission('billing.create'), billingController.resendBillingDelivery);
+router.post('/billing/:id/resend-delivery', authenticateToken, scopeEventAccess, requirePermission(['billing.create', 'cashier.sell', 'cashier.view_own_sales']), billingController.resendBillingDelivery);
 router.get('/billing/history', authenticateToken, scopeEventAccess, billingController.getBillingHistory);
 
 // Public Customer PDF Downloads (Secured by unguessable cryptographic token — no login needed)
