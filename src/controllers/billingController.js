@@ -64,7 +64,8 @@ async function previewBilling(req, res, next) {
       code: 'PREVIEW7',
       code_type: category.code,
       customer_name: customerName,
-      sponsor_name: sponsorName
+      sponsor_name: sponsorName,
+      photo_url: req.body.photoUrl || req.body.photo_url || null
     };
 
     const mockBilling = {

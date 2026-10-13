@@ -347,11 +347,19 @@ async function resharePass({
       code_type: pass.code_type,
       category_name: pass.category_name,
       customer_name: targetCustomerName,
-      sponsor_name: pass.sponsor_name
+      sponsor_name: pass.sponsor_name,
+      photo_url: pass.photo_url,
+      custom_fields_data: pass.custom_fields_data
     },
     event: { id: pass.event_id, event_name: pass.event_name, venue: pass.venue },
-    category: { id: pass.category_id, name: pass.category_name, code: pass.code_type },
-    customer: { name: targetCustomerName, email: targetEmail, phone: targetPhone },
+    category: {
+      id: pass.category_id,
+      name: pass.category_name,
+      code: pass.code_type,
+      valid_from: pass.valid_from,
+      valid_until: pass.valid_until
+    },
+    customer: { name: targetCustomerName, email: targetEmail, phone: targetPhone, photo_url: pass.photo_url },
     sponsor: pass.sponsor_name
   });
 

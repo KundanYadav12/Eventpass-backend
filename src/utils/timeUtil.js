@@ -239,14 +239,13 @@ function formatDateTimeIST(dateInput) {
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
-    second: '2-digit',
     hour12: true
   });
-  return formatted.replace(/\b(am|pm)\b/gi, (m) => m.toLowerCase());
+  return formatted.replace(/\b(am|pm)\b/gi, (m) => m.toUpperCase());
 }
 
 /**
- * Format a Date to IST Date only string (e.g. "04 Sep 2026")
+ * Format a Date to IST Date only string (e.g. "2 Oct 2026")
  */
 function formatDateIST(dateInput) {
   if (!dateInput) return '—';
@@ -254,10 +253,33 @@ function formatDateIST(dateInput) {
   if (!d || isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('en-GB', {
     timeZone: IST_TIMEZONE,
-    day: '2-digit',
+    day: 'numeric',
     month: 'short',
     year: 'numeric'
   });
+}
+
+/**
+ * Calculate scan cycle date key (YYYY-MM-DD) for Mode B renewable pass in IST
+ */
+function getScanCycleKey(dateInput = new Date(), renewalTimeStr = '01:00') {
+  const d = parseDate(dateInput);
+  let renHour = 1;
+  let renMin = 0;
+  if (renewalTimeStr && renewalTimeStr.includes(':')) {
+    const parts = renewalTimeStr.split(':');
+    renHour = parseInt(parts[0], 10) || 0;
+    renMin = parseInt(parts[1], 10) || 0;
+  }
+  const currentTotalMins = d.getUTCHours() * 60 + d.getUTCMinutes();
+  const renTotalMins = renHour * 60 + renMin;
+
+  const dObj = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  if (currentTotalMins < renTotalMins) {
+    dObj.setUTCDate(dObj.getUTCDate() - 1);
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${dObj.getUTCFullYear()}-${pad(dObj.getUTCMonth() + 1)}-${pad(dObj.getUTCDate())}`;
 }
 
 /**
@@ -409,6 +431,7 @@ module.exports = {
   checkValidityWindow,
   calculateRenewalCycle,
   hasScannedInCurrentCycle,
+  getScanCycleKey,
   formatMySqlDateTime,
   toIsoUtcString
 };

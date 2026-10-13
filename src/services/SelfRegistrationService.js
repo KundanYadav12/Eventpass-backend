@@ -25,6 +25,17 @@ function isValidEmail(email) {
 }
 
 /**
+ * Calculate actual binary byte size from base64 data string
+ */
+function getBase64ByteSize(base64Str) {
+  if (!base64Str || typeof base64Str !== 'string') return 0;
+  const commaIdx = base64Str.indexOf(',');
+  const data = commaIdx >= 0 ? base64Str.substring(commaIdx + 1) : base64Str;
+  const padding = data.endsWith('==') ? 2 : (data.endsWith('=') ? 1 : 0);
+  return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+}
+
+/**
  * Create a new Self Registration configuration
  */
 async function createSelfRegistration({
@@ -44,6 +55,7 @@ async function createSelfRegistration({
   requireAge = false,
   allowDuplicate = false,
   maxRegistrations = null,
+  customFields = null,
   userId = null,
   userName = 'Admin',
   ipAddress = null,
@@ -100,14 +112,15 @@ async function createSelfRegistration({
   const cleanTitle = title && title.trim() ? title.trim() : `${category.name} — Self Registration`;
   const cleanDesc = description && description.trim() ? description.trim() : null;
   const maxRegs = maxRegistrations ? Math.max(1, parseInt(maxRegistrations, 10)) : null;
+  const cleanCustomFields = customFields ? (typeof customFields === 'string' ? customFields : JSON.stringify(customFields)) : null;
 
   const result = await query(
     `INSERT INTO self_registrations (
       public_token, event_id, category_id, pass_style_id, title, description,
       status, starts_at, ends_at, delivery_channel,
       require_name, require_phone, require_email, require_address, require_gender, require_age,
-      allow_duplicate, max_registrations, registration_count, created_by, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW())`,
+      allow_duplicate, max_registrations, registration_count, custom_fields, created_by, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NOW())`,
     [
       publicToken,
       targetEventId,
@@ -126,6 +139,7 @@ async function createSelfRegistration({
       requireAge ? 1 : 0,
       allowDuplicate ? 1 : 0,
       maxRegs,
+      cleanCustomFields,
       userId
     ]
   );
@@ -275,6 +289,15 @@ async function getSelfRegistrationById(id, { eventId = null, isSuperAdmin = fals
   }
 
   const record = rows[0];
+  if (record.custom_fields) {
+    try {
+      record.customFields = typeof record.custom_fields === 'string' ? JSON.parse(record.custom_fields) : record.custom_fields;
+    } catch (_) {
+      record.customFields = [];
+    }
+  } else {
+    record.customFields = [];
+  }
 
   // Event Isolation check
   if (!isSuperAdmin && eventId && Number(record.event_id) !== Number(eventId)) {
@@ -306,7 +329,8 @@ async function updateSelfRegistration(id, updateData, { eventId = null, isSuperA
     requireAge,
     allowDuplicate,
     maxRegistrations,
-    status
+    status,
+    customFields
   } = updateData;
 
   // Validate category if changing
@@ -325,6 +349,9 @@ async function updateSelfRegistration(id, updateData, { eventId = null, isSuperA
   const validChannels = ['WHATSAPP', 'EMAIL', 'BOTH'];
   const targetChannel = deliveryChannel && validChannels.includes(deliveryChannel) ? deliveryChannel : current.delivery_channel;
   const targetStatus = status && ['ACTIVE', 'DISABLED'].includes(status) ? status : current.status;
+  const cleanCustomFields = customFields !== undefined
+    ? (customFields ? (typeof customFields === 'string' ? customFields : JSON.stringify(customFields)) : null)
+    : current.custom_fields;
 
   await query(
     `UPDATE self_registrations
@@ -344,6 +371,7 @@ async function updateSelfRegistration(id, updateData, { eventId = null, isSuperA
          allow_duplicate = ?,
          max_registrations = ?,
          status = ?,
+         custom_fields = ?,
          updated_at = NOW()
      WHERE id = ?`,
     [
@@ -363,6 +391,7 @@ async function updateSelfRegistration(id, updateData, { eventId = null, isSuperA
       allowDuplicate !== undefined ? (allowDuplicate ? 1 : 0) : current.allow_duplicate,
       maxRegistrations !== undefined ? (maxRegistrations ? parseInt(maxRegistrations, 10) : null) : current.max_registrations,
       targetStatus,
+      cleanCustomFields,
       current.id
     ]
   );
@@ -416,11 +445,11 @@ async function toggleSelfRegistrationStatus(id, { status, eventId = null, isSupe
 /**
  * Get attendees/passes generated via this Self Registration
  */
-async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin = false, page = 1, limit = 20, search = '' } = {}) {
+async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin = false, page = 1, limit = 50, search = '' } = {}) {
   const selfReg = await getSelfRegistrationById(id, { eventId, isSuperAdmin });
 
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
-  const pageLimit = Math.min(100, Math.max(5, parseInt(limit, 10) || 20));
+  const pageLimit = Math.min(500, Math.max(5, parseInt(limit, 10) || 50));
   const offset = (pageNum - 1) * pageLimit;
 
   const whereConditions = ['p.self_registration_id = ?'];
@@ -445,6 +474,8 @@ async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin =
       p.customer_name,
       p.customer_email,
       p.customer_phone,
+      p.photo_url,
+      p.custom_fields_data,
       p.address,
       p.gender,
       p.age,
@@ -464,6 +495,89 @@ async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin =
 
   const passes = await query(listSql, [...queryParams, pageLimit, offset]);
 
+  // Fetch all active checkpoints for this event
+  const checkpoints = await query(
+    `SELECT id, name, code, checkpoint_type, start_time, end_time, display_order
+     FROM scan_checkpoints
+     WHERE event_id = ? AND is_active = TRUE
+     ORDER BY display_order ASC, id ASC`,
+    [selfReg.event_id]
+  );
+
+  // Fetch approved checkpoint scans for these passes
+  const passIds = passes.map(p => p.id);
+  const checkpointScansByPass = {};
+
+  if (passIds.length > 0) {
+    const placeholders = passIds.map(() => '?').join(',');
+    const scanRows = await query(
+      `SELECT pass_id, checkpoint_id, MIN(scan_time) as first_scan_time, MAX(scan_time) as last_scan_time
+       FROM scan_history
+       WHERE pass_id IN (${placeholders}) AND checkpoint_id IS NOT NULL AND result = 'approved'
+       GROUP BY pass_id, checkpoint_id`,
+      passIds
+    );
+
+    for (const sr of scanRows) {
+      if (!checkpointScansByPass[sr.pass_id]) {
+        checkpointScansByPass[sr.pass_id] = {};
+      }
+      checkpointScansByPass[sr.pass_id][sr.checkpoint_id] = {
+        scanned: true,
+        firstScanTime: sr.first_scan_time,
+        firstScanTimeIST: formatDateTimeIST(sr.first_scan_time)
+      };
+    }
+  }
+
+  // Format passes with dynamic attendance tracking
+  const formattedPasses = passes.map(p => {
+    let customFieldsData = {};
+    if (p.custom_fields_data) {
+      try {
+        customFieldsData = typeof p.custom_fields_data === 'string' ? JSON.parse(p.custom_fields_data) : p.custom_fields_data;
+      } catch (_) {}
+    }
+
+    const scans = checkpointScansByPass[p.id] || {};
+    const hasAnyScan = (p.scan_count > 0) || Boolean(p.first_scanned_at) || Object.keys(scans).length > 0;
+
+    return {
+      id: p.id,
+      code: p.code,
+      customerName: p.customer_name,
+      customer_name: p.customer_name,
+      customerEmail: p.customer_email,
+      customer_email: p.customer_email,
+      customerPhone: p.customer_phone,
+      customer_phone: p.customer_phone,
+      photoUrl: p.photo_url,
+      photo_url: p.photo_url,
+      customFieldsData,
+      custom_fields_data: customFieldsData,
+      address: p.address,
+      gender: p.gender,
+      age: p.age,
+      status: p.status,
+      scanCount: p.scan_count || 0,
+      firstScannedAt: p.first_scanned_at,
+      firstScannedAtIST: p.first_scanned_at ? formatDateTimeIST(p.first_scanned_at) : null,
+      lastScannedAt: p.last_scanned_at,
+      lastScannedAtIST: p.last_scanned_at ? formatDateTimeIST(p.last_scanned_at) : null,
+      createdAt: p.created_at,
+      downloadToken: p.download_token,
+      checkpointScans: scans,
+      isPresent: hasAnyScan
+    };
+  });
+
+  let customFields = [];
+  if (selfReg.custom_fields) {
+    try {
+      customFields = typeof selfReg.custom_fields === 'string' ? JSON.parse(selfReg.custom_fields) : selfReg.custom_fields;
+    } catch (_) {}
+  }
+
   return {
     selfRegistration: {
       id: selfReg.id,
@@ -472,7 +586,16 @@ async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin =
       categoryName: selfReg.category_name,
       totalIssued: totalRecords
     },
-    passes,
+    checkpoints: checkpoints.map(c => ({
+      id: c.id,
+      name: c.name,
+      code: c.code,
+      checkpointType: c.checkpoint_type,
+      startTime: c.start_time,
+      endTime: c.end_time
+    })),
+    customFields,
+    passes: formattedPasses,
     pagination: {
       page: pageNum,
       limit: pageLimit,
@@ -512,6 +635,7 @@ async function getPublicRegistrationConfig(publicToken) {
       sr.require_address,
       sr.require_gender,
       sr.require_age,
+      sr.custom_fields,
       sr.max_registrations,
       sr.registration_count,
       e.id AS event_id,
@@ -610,6 +734,7 @@ async function getPublicRegistrationConfig(publicToken) {
         requireGender: Boolean(config.require_gender),
         requireAge: Boolean(config.require_age)
       },
+      customFields: config.custom_fields ? (typeof config.custom_fields === 'string' ? JSON.parse(config.custom_fields) : config.custom_fields) : [],
       event: {
         name: config.event_name,
         venue: config.venue,
@@ -643,7 +768,9 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
     email,
     address,
     gender,
-    age
+    age,
+    customFieldsData,
+    photoUrl
   } = formData || {};
 
   // 1. Fetch and validate registration configuration
@@ -725,6 +852,57 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
   const parsedAge = age !== undefined && age !== null && age !== '' ? parseInt(age, 10) : null;
   if (selfReg.require_age && (!parsedAge || parsedAge < 1 || parsedAge > 120)) {
     throw new Error('Please enter a valid age.');
+  }
+
+  // Validate dynamic form fields configured for this registration
+  if (selfReg.custom_fields) {
+    try {
+      const parsedFields = typeof selfReg.custom_fields === 'string' ? JSON.parse(selfReg.custom_fields) : selfReg.custom_fields;
+      if (Array.isArray(parsedFields)) {
+        for (const field of parsedFields) {
+          if (field.required) {
+            const val = customFieldsData ? (customFieldsData[field.id] !== undefined ? customFieldsData[field.id] : customFieldsData[field.label]) : null;
+            if (field.type === 'image') {
+              const imgVal = photoUrl || val;
+              if (!imgVal) {
+                throw new Error(`${field.label || 'Image upload'} is required.`);
+              }
+            } else if (val === null || val === undefined || String(val).trim() === '' || (Array.isArray(val) && val.length === 0)) {
+              throw new Error(`${field.label || 'Field'} is required.`);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (e.message && e.message.includes('required')) throw e;
+    }
+  }
+
+  // Resolve attendee photo from direct upload or custom fields data
+  let finalPhotoUrl = photoUrl || null;
+  if (!finalPhotoUrl && customFieldsData) {
+    for (const val of Object.values(customFieldsData)) {
+      if (typeof val === 'string' && (val.startsWith('data:image') || val.startsWith('http://') || val.startsWith('https://') || val.startsWith('/uploads/'))) {
+        finalPhotoUrl = val;
+        break;
+      }
+    }
+  }
+
+  // Validate photo size & format if provided as base64 (<500 KB strictly enforced)
+  if (finalPhotoUrl && typeof finalPhotoUrl === 'string' && finalPhotoUrl.startsWith('data:image')) {
+    const mimeMatch = finalPhotoUrl.match(/^data:(image\/[a-zA-Z0-9\-\+\.]+);base64,/i);
+    if (!mimeMatch) {
+      throw new Error('Invalid image format. Supported formats: JPEG, PNG, WebP.');
+    }
+    const mime = mimeMatch[1].toLowerCase();
+    if (!['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(mime)) {
+      throw new Error(`Unsupported image format (${mime}). Allowed formats: JPG, PNG, WebP.`);
+    }
+    const byteSize = getBase64ByteSize(finalPhotoUrl);
+    if (byteSize > 500 * 1024) {
+      throw new Error(`Uploaded image exceeds 500 KB limit (${Math.round(byteSize / 1024)} KB). Please compress or choose a smaller image.`);
+    }
   }
 
   // 3. Concurrency Lock & Idempotency Key
@@ -860,12 +1038,14 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
           event_id, category_id, code, code_type, category_prefix, hmac_sig,
           status, valid_from, valid_until, printed, billing_id, style_id,
           customer_name, customer_email, customer_phone, address, gender, age,
+          photo_url, custom_fields_data,
           sharing_method, source, self_registration_id,
           first_shared_at, last_shared_at, reshare_count, created_at
         ) VALUES (
           ?, ?, ?, ?, ?, ?,
           'active', ?, ?, false, ?, ?,
           ?, ?, ?, ?, ?, ?,
+          ?, ?,
           ?, 'SELF_REGISTRATION', ?,
           NOW(), NOW(), 0, NOW()
         )`,
@@ -886,6 +1066,8 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
           cleanAddress,
           cleanGender,
           parsedAge,
+          finalPhotoUrl,
+          customFieldsData ? JSON.stringify(customFieldsData) : null,
           selfReg.delivery_channel,
           selfReg.id
         ]
@@ -938,11 +1120,19 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
           code: result.code,
           code_type: selfReg.category_code,
           category_name: selfReg.category_name,
-          customer_name: cleanName
+          customer_name: cleanName,
+          photo_url: finalPhotoUrl,
+          custom_fields_data: customFieldsData
         },
         event: { id: selfReg.event_id, event_name: selfReg.event_name, venue: selfReg.venue },
-        category: { id: selfReg.category_id, name: selfReg.category_name, code: selfReg.category_code },
-        customer: { name: cleanName, email: cleanEmail, phone: cleanPhone }
+        category: {
+          id: selfReg.category_id,
+          name: selfReg.category_name,
+          code: selfReg.category_code,
+          valid_from: selfReg.valid_from,
+          valid_until: selfReg.valid_until
+        },
+        customer: { name: cleanName, email: cleanEmail, phone: cleanPhone, photo_url: finalPhotoUrl }
       });
     } catch (pdfErr) {
       console.error('[Self Registration PDF Error]', pdfErr.message);
@@ -1072,6 +1262,10 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
         customer_name: cleanName,
         customer_email: cleanEmail,
         customer_phone: cleanPhone,
+        photo_url: finalPhotoUrl,
+        photoUrl: finalPhotoUrl,
+        custom_fields_data: customFieldsData,
+        customFieldsData,
         event_name: selfReg.event_name,
         venue: selfReg.venue,
         category_name: selfReg.category_name,

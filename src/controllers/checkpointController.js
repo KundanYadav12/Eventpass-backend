@@ -27,6 +27,9 @@ async function createCheckpoint(req, res, next) {
     const displayOrder = req.body.displayOrder !== undefined ? req.body.displayOrder : (req.body.display_order !== undefined ? req.body.display_order : 0);
     const maxScansPerPass = req.body.maxScansPerPass !== undefined ? req.body.maxScansPerPass : (req.body.max_scans_per_pass !== undefined ? req.body.max_scans_per_pass : 1);
     const allowedCategories = req.body.allowedCategories || req.body.allowed_categories;
+    const startTime = req.body.startTime || req.body.start_time || null;
+    const endTime = req.body.endTime || req.body.end_time || null;
+    const checkpointType = req.body.checkpointType || req.body.checkpoint_type || 'LOCATION';
     const userId = req.user?.id || null;
     const userName = req.user?.name || 'Admin';
     const ipAddress = req.ip || req.connection.remoteAddress;
@@ -40,6 +43,9 @@ async function createCheckpoint(req, res, next) {
       displayOrder,
       maxScansPerPass,
       allowedCategories,
+      startTime,
+      endTime,
+      checkpointType,
       userId,
       userName,
       ipAddress,
@@ -59,7 +65,21 @@ async function createCheckpoint(req, res, next) {
 async function updateCheckpoint(req, res, next) {
   try {
     const { id } = req.params;
-    const { name, code, description, displayOrder, isActive, maxScansPerPass, allowedCategories } = req.body;
+    const {
+      name,
+      code,
+      description,
+      displayOrder,
+      isActive,
+      maxScansPerPass,
+      allowedCategories,
+      startTime,
+      endTime,
+      checkpointType,
+      start_time,
+      end_time,
+      checkpoint_type
+    } = req.body;
     const userId = req.user?.id || null;
     const userName = req.user?.name || 'Admin';
     const ipAddress = req.ip || req.connection.remoteAddress;
@@ -74,6 +94,9 @@ async function updateCheckpoint(req, res, next) {
       isActive,
       maxScansPerPass,
       allowedCategories,
+      startTime: startTime !== undefined ? startTime : start_time,
+      endTime: endTime !== undefined ? endTime : end_time,
+      checkpointType: checkpointType !== undefined ? checkpointType : checkpoint_type,
       userId,
       userName,
       ipAddress,

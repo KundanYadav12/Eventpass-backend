@@ -5,6 +5,8 @@ const {
   checkValidityWindow,
   calculateRenewalCycle,
   hasScannedInCurrentCycle,
+  getISTComponents,
+  getISTDayBoundsUTC,
   formatDateTimeIST,
   formatDateIST,
   formatTimeIST,
@@ -438,26 +440,83 @@ async function processScan({
           }
         }
 
-        // Check prior approved scans at THIS checkpoint
+        // 1. Time-window validation in IST (if checkpoint has configured time window)
+        if (checkpoint.start_time && checkpoint.end_time) {
+          const ist = getISTComponents(scanTime);
+          const currentSec = (ist.hour || 0) * 3600 + (ist.minute || 0) * 60 + (ist.second || 0);
+
+          const [sh, sm, ss] = String(checkpoint.start_time).split(':').map(Number);
+          const startSec = (sh || 0) * 3600 + (sm || 0) * 60 + (ss || 0);
+
+          const [eh, em, es] = String(checkpoint.end_time).split(':').map(Number);
+          const endSec = (eh || 0) * 3600 + (em || 0) * 60 + (es || 0);
+
+          let isInsideWindow = true;
+          if (startSec <= endSec) {
+            isInsideWindow = currentSec >= startSec && currentSec <= endSec;
+          } else {
+            // Overnight window (e.g. 22:00 to 02:00)
+            isInsideWindow = currentSec >= startSec || currentSec <= endSec;
+          }
+
+          if (!isInsideWindow) {
+            const startFormatted = formatTimeIST(checkpoint.start_time);
+            const endFormatted = formatTimeIST(checkpoint.end_time);
+            const timeDenyMsg = `${checkpoint.name} is open ${startFormatted} – ${endFormatted} IST. Entry not allowed right now.`;
+
+            await conn.query(
+              `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'denied', ?, ?)`,
+              [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, timeDenyMsg, ipAddress]
+            );
+
+            return {
+              success: false,
+              result: 'denied',
+              message: timeDenyMsg,
+              reason: timeDenyMsg,
+              passCode: cleanCode,
+              checkpoint: {
+                id: checkpoint.id,
+                name: checkpoint.name,
+                code: checkpoint.code,
+                startTime: checkpoint.start_time,
+                endTime: checkpoint.end_time,
+                checkpointType: checkpoint.checkpoint_type
+              },
+              event: formatEventPayload(pass),
+              category: formatCategoryPayload(pass),
+              pass: formatPassPayload(pass)
+            };
+          }
+        }
+
+        // 2. Check prior approved scans at THIS checkpoint for CURRENT CALENDAR DAY in IST
+        const ist = getISTComponents(scanTime);
+        const istDateStr = `${ist.year}-${String(ist.month).padStart(2, '0')}-${String(ist.day).padStart(2, '0')}`;
+        const { startUtc, endUtc } = getISTDayBoundsUTC(istDateStr);
+
         const [chkScans] = await conn.query(
-          `SELECT COUNT(*) as scan_count, MAX(scan_time) as last_scan
+          `SELECT COUNT(*) as scan_count, MIN(scan_time) as first_scan, MAX(scan_time) as last_scan
            FROM scan_history
-           WHERE pass_id = ? AND checkpoint_id = ? AND result = 'approved'`,
-          [pass.id, checkpoint.id]
+           WHERE pass_id = ? AND checkpoint_id = ? AND result = 'approved'
+             AND scan_time >= ? AND scan_time <= ?`,
+          [pass.id, checkpoint.id, startUtc, endUtc]
         );
 
         const chkScanCount = chkScans[0]?.scan_count || 0;
         const maxScans = checkpoint.max_scans_per_pass || 1;
 
         if (chkScanCount >= maxScans) {
-          const lastScanFormatted = chkScans[0]?.last_scan ? formatDateTimeIST(chkScans[0].last_scan) : 'earlier';
-          const reason = `Already scanned at '${checkpoint.name}' at ${lastScanFormatted} (Limit: ${maxScans}).`;
-          const msg = `Already Scanned — ${checkpoint.name}`;
+          const firstScanTime = chkScans[0]?.first_scan || chkScans[0]?.last_scan;
+          const firstScanTimeIST = firstScanTime ? formatTimeIST(firstScanTime) : 'earlier';
+          const msg = `Already scanned for ${checkpoint.name}`;
+          const reason = `First scanned at ${firstScanTimeIST} IST`;
 
           await conn.query(
             `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'already_used', ?, ?)`,
-            [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, reason, ipAddress]
+            [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, `${msg} (${reason})`, ipAddress]
           );
 
           // Update passes.last_scanned_at to record this latest scan attempt (first_scanned_at remains fixed)
@@ -472,11 +531,18 @@ async function processScan({
             message: msg,
             reason: reason,
             passCode: cleanCode,
-            checkpoint: { id: checkpoint.id, name: checkpoint.name, code: checkpoint.code },
+            checkpoint: {
+              id: checkpoint.id,
+              name: checkpoint.name,
+              code: checkpoint.code,
+              startTime: checkpoint.start_time,
+              endTime: checkpoint.end_time,
+              checkpointType: checkpoint.checkpoint_type
+            },
             scanCount: chkScanCount,
             checkpointLimit: maxScans,
-            firstScannedAt: toIsoUtcString(pass.first_scanned_at),
-            firstScannedAtIST: formatDateTimeIST(pass.first_scanned_at),
+            firstScannedAt: toIsoUtcString(firstScanTime || pass.first_scanned_at),
+            firstScannedAtIST: `${firstScanTimeIST} IST`,
             lastScannedAt: toIsoUtcString(sqlScanTime),
             lastScannedAtIST: formatDateTimeIST(sqlScanTime),
             event: formatEventPayload(pass),
@@ -485,15 +551,15 @@ async function processScan({
               ...formatPassPayload(pass),
               scanCount: chkScanCount,
               scan_count: chkScanCount,
-              firstScannedAt: toIsoUtcString(pass.first_scanned_at),
-              firstScannedAtIST: formatDateTimeIST(pass.first_scanned_at),
+              firstScannedAt: toIsoUtcString(firstScanTime || pass.first_scanned_at),
+              firstScannedAtIST: `${firstScanTimeIST} IST`,
               lastScannedAt: toIsoUtcString(sqlScanTime),
               lastScannedAtIST: formatDateTimeIST(sqlScanTime)
             }
           };
         }
 
-        // Approve checkpoint scan
+        // 3. Approve checkpoint scan inside window (or unrestricted)
         const isFirstScan = !pass.first_scanned_at;
         const firstScanUtc = isFirstScan ? sqlScanTime : pass.first_scanned_at;
         await conn.query(
@@ -518,7 +584,14 @@ async function processScan({
           result: 'approved',
           message: approvedMsg,
           passCode: cleanCode,
-          checkpoint: { id: checkpoint.id, name: checkpoint.name, code: checkpoint.code },
+          checkpoint: {
+            id: checkpoint.id,
+            name: checkpoint.name,
+            code: checkpoint.code,
+            startTime: checkpoint.start_time,
+            endTime: checkpoint.end_time,
+            checkpointType: checkpoint.checkpoint_type
+          },
           scanCount: chkScanCount + 1,
           checkpointLimit: maxScans,
           firstScannedAt: toIsoUtcString(firstScanUtc),

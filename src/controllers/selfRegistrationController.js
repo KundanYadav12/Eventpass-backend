@@ -25,7 +25,8 @@ async function create(req, res, next) {
       requireGender,
       requireAge,
       allowDuplicate,
-      maxRegistrations
+      maxRegistrations,
+      customFields
     } = req.body;
 
     const assignedEventId = isSuperAdmin ? (eventId || req.effectiveEventId) : req.effectiveEventId;
@@ -50,6 +51,7 @@ async function create(req, res, next) {
       requireAge,
       allowDuplicate,
       maxRegistrations,
+      customFields: customFields || null,
       userId: req.user?.id,
       userName: req.user?.name || 'Admin',
       ipAddress: req.ip || req.connection?.remoteAddress,

@@ -196,39 +196,182 @@ async function renderPassOnDocument(doc, {
       continue;
     }
 
-    // Text elements
+    // Check if dynamic Photo element
+    const isPhotoElement =
+      el.type === 'photo' ||
+      el.field === 'photo' ||
+      el.id?.startsWith('el_photo');
+
+    if (isPhotoElement) {
+      // 1. Resolve photo data
+      let photoData = null;
+
+      let customFields = pass.custom_fields_data;
+      if (typeof customFields === 'string') {
+        try { customFields = JSON.parse(customFields); } catch (e) { customFields = {}; }
+      }
+
+      // a. Check specific custom_fields_data key if configured
+      if (el.imageField && customFields && typeof customFields === 'object') {
+        photoData = customFields[el.imageField];
+      }
+
+      // b. Check custom_fields_data for any image URL/dataUrl if not resolved yet
+      if (!photoData && customFields && typeof customFields === 'object') {
+        for (const val of Object.values(customFields)) {
+          if (typeof val === 'string' && (val.startsWith('data:image') || val.startsWith('http://') || val.startsWith('https://') || val.startsWith('/uploads/'))) {
+            photoData = val;
+            break;
+          }
+        }
+      }
+
+      // c. Check pass direct photo properties
+      if (!photoData) {
+        photoData = pass.photo_url || pass.photoUrl || customer.photo_url || customer.photo;
+      }
+
+      // If no photo exists, render NOTHING (no placeholder, frame, or avatar)
+      if (!photoData || typeof photoData !== 'string' || !photoData.trim()) {
+        continue;
+      }
+
+      try {
+        let imgBuffer = null;
+        if (photoData.startsWith('data:image')) {
+          const commaIdx = photoData.indexOf(',');
+          const base64Data = commaIdx !== -1 ? photoData.slice(commaIdx + 1) : photoData;
+          imgBuffer = Buffer.from(base64Data, 'base64');
+        }
+
+        if (imgBuffer) {
+          doc.save();
+
+          // Apply clipping shape
+          const shape = (el.shape || 'rounded').toLowerCase();
+          if (shape === 'circle') {
+            const r = Math.min(w, h) / 2;
+            const cx = x + w / 2;
+            const cy = y + h / 2;
+            doc.circle(cx, cy, r).clip();
+          } else if (shape === 'rounded') {
+            const radius = Math.min(12 * scale, w / 4, h / 4);
+            doc.roundedRect(x, y, w, h, radius).clip();
+          } else {
+            // square / rectangle
+            doc.rect(x, y, w, h).clip();
+          }
+
+          // Image fit: cover (default) or contain
+          const fitMode = (el.fit || 'cover').toLowerCase();
+          if (fitMode === 'contain') {
+            doc.image(imgBuffer, x, y, { fit: [w, h], align: 'center', valign: 'center' });
+          } else {
+            doc.image(imgBuffer, x, y, { cover: [w, h], align: 'center', valign: 'center' });
+          }
+
+          doc.restore();
+
+          // Optional Border
+          if (el.borderWidth && Number(el.borderWidth) > 0) {
+            doc.save();
+            doc.lineWidth(Number(el.borderWidth) * scale);
+            doc.strokeColor(el.borderColor || '#FFFFFF');
+            if (shape === 'circle') {
+              const r = Math.min(w, h) / 2;
+              const cx = x + w / 2;
+              const cy = y + h / 2;
+              doc.circle(cx, cy, r).stroke();
+            } else if (shape === 'rounded') {
+              const radius = Math.min(12 * scale, w / 4, h / 4);
+              doc.roundedRect(x, y, w, h, radius).stroke();
+            } else {
+              doc.rect(x, y, w, h).stroke();
+            }
+            doc.restore();
+          }
+        }
+      } catch (photoErr) {
+        console.warn('[PDF] Failed to render attendee photo:', photoErr.message);
+      }
+      continue;
+    }
+
+    // Text elements (No default or fallback labels if empty)
     let textValue = '';
     switch (el.field) {
       case 'event_name':
-        textValue = event.event_name || 'Event 2026';
+        textValue = event.event_name || el.text || '';
         break;
       case 'category_name':
-        textValue = category.name || pass.code_type || 'VIP Pass';
+        textValue = category.name || pass.code_type || el.text || '';
         break;
       case 'customer_name':
-        textValue = customer.name || customer.customer_name || pass.customer_name || 'Pass Holder';
+        textValue = customer.name || customer.customer_name || pass.customer_name || el.text || '';
         break;
       case 'pass_code':
-        textValue = `CODE: ${pass.code}`;
+        if (pass.code) {
+          textValue = `PASS CODE: ${pass.code}`;
+        } else {
+          textValue = el.text || '';
+        }
         break;
       case 'validity':
-        textValue = category.valid_from && category.valid_until
-          ? `${formatDateIST(category.valid_from)} – ${formatDateIST(category.valid_until)}`
-          : 'Valid for Event Entry';
+        if (category.valid_from && category.valid_until) {
+          textValue = `${formatDateIST(category.valid_from)} – ${formatDateIST(category.valid_until)}`;
+        } else {
+          textValue = el.text || '';
+        }
         break;
-      case 'sponsor':
-        textValue = sponsor || pass.sponsor_name ? `SPONSORED BY ${sponsor || pass.sponsor_name}` : '';
+      case 'sponsor': {
+        const sp = sponsor || pass.sponsor_name || el.text || '';
+        if (sp) {
+          textValue = sp.toLowerCase().startsWith('sponsored by') ? sp : `Sponsored by ${sp}`;
+        } else {
+          textValue = '';
+        }
         break;
+      }
       case 'price':
-        textValue = category.price !== undefined ? `₹${parseFloat(category.price).toFixed(2)}` : '';
+        textValue = (category.price !== undefined && category.price !== null && category.price !== '')
+          ? `₹${parseFloat(category.price).toFixed(2)}`
+          : (el.text || '');
         break;
       case 'custom':
       default:
-        textValue = el.text || el.label || '';
+        textValue = el.text || '';
         break;
     }
 
-    if (textValue) {
+    // Strict No-Default rule: do not print any forbidden fallback strings or labels
+    const FORBIDDEN_FALLBACKS = new Set([
+      'event name',
+      'category / tier',
+      'category',
+      'pass holder name',
+      'customer name',
+      'validity window',
+      'unique pass code',
+      'sponsor info',
+      'custom text',
+      'custom notice / entry rule',
+      'event 2026',
+      'vip pass',
+      'pass holder',
+      'valid for event entry',
+      'corporate expo 2026',
+      'vip all-access pass',
+      'aarav sharma',
+      'valid: 2 oct 2026 – 4 oct 2026',
+      'pass code: 55kdbd2',
+      'sponsored by techcorp india'
+    ]);
+
+    if (textValue && FORBIDDEN_FALLBACKS.has(textValue.trim().toLowerCase())) {
+      textValue = '';
+    }
+
+    if (textValue && textValue.trim()) {
       doc
         .fontSize(fontSize)
         .fillColor(color)
@@ -332,13 +475,13 @@ function drawDefaultBackground(doc, width, height, category) {
  */
 function getDefaultElementsConfig(canvasWidth = 800, canvasHeight = 1200) {
   return [
-    { id: 'el_event', type: 'text', field: 'event_name', label: 'Event Name', x: 40, y: 50, width: 720, height: 60, fontSize: 32, fontColor: '#60A5FA', textAlign: 'center' },
-    { id: 'el_category', type: 'text', field: 'category_name', label: 'Category', x: 40, y: 130, width: 720, height: 50, fontSize: 26, fontColor: '#F59E0B', textAlign: 'center' },
-    { id: 'el_customer', type: 'text', field: 'customer_name', label: 'Customer Name', x: 40, y: 220, width: 720, height: 40, fontSize: 22, fontColor: '#FFFFFF', textAlign: 'center' },
-    { id: 'el_validity', type: 'text', field: 'validity', label: 'Validity Window', x: 40, y: 290, width: 720, height: 35, fontSize: 16, fontColor: '#94A3B8', textAlign: 'center' },
+    { id: 'el_event', type: 'text', field: 'event_name', label: 'Event Name', text: '', x: 40, y: 50, width: 720, height: 60, fontSize: 32, fontColor: '#60A5FA', textAlign: 'center' },
+    { id: 'el_category', type: 'text', field: 'category_name', label: 'Category / Tier', text: '', x: 40, y: 130, width: 720, height: 50, fontSize: 26, fontColor: '#F59E0B', textAlign: 'center' },
+    { id: 'el_customer', type: 'text', field: 'customer_name', label: 'Pass Holder Name', text: '', x: 40, y: 220, width: 720, height: 40, fontSize: 22, fontColor: '#FFFFFF', textAlign: 'center' },
+    { id: 'el_validity', type: 'text', field: 'validity', label: 'Validity Window', text: '', x: 40, y: 290, width: 720, height: 35, fontSize: 16, fontColor: '#94A3B8', textAlign: 'center' },
     { id: 'el_barcode', type: 'barcode', field: 'barcode', label: 'Barcode', x: 150, y: 400, width: 500, height: 140, isVisible: true },
-    { id: 'el_code', type: 'text', field: 'pass_code', label: 'Pass Code', x: 40, y: 560, width: 720, height: 40, fontSize: 24, fontColor: '#38BDF8', textAlign: 'center' },
-    { id: 'el_sponsor', type: 'text', field: 'sponsor', label: 'Sponsor Info', x: 40, y: 640, width: 720, height: 35, fontSize: 15, fontColor: '#E2E8F0', textAlign: 'center' }
+    { id: 'el_code', type: 'text', field: 'pass_code', label: 'Pass Code', text: '', x: 40, y: 560, width: 720, height: 40, fontSize: 24, fontColor: '#38BDF8', textAlign: 'center' },
+    { id: 'el_sponsor', type: 'text', field: 'sponsor', label: 'Sponsor Info', text: '', x: 40, y: 640, width: 720, height: 35, fontSize: 15, fontColor: '#E2E8F0', textAlign: 'center' }
   ];
 }
 
