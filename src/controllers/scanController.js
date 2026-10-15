@@ -6,7 +6,7 @@ const { query } = require('../config/db');
  */
 async function scan(req, res, next) {
   try {
-    const { code, deviceId = 'GATE-01', targetEventId = null, checkpointId = null } = req.body;
+    const { code, deviceId = 'GATE-01', targetEventId = null, checkpointId = null, scanSource = 'camera' } = req.body;
     const operatorId = req.user?.id || null;
     const operatorName = req.user?.name || null;
     const operatorRole = req.user?.role || null;
@@ -36,6 +36,7 @@ async function scan(req, res, next) {
       operatorEventId,
       targetEventId: resolvedTargetEventId,
       checkpointId: checkpointId ? parseInt(checkpointId, 10) : null,
+      scanSource,
       ipAddress
     });
 
@@ -62,6 +63,7 @@ async function getScanHistory(req, res, next) {
       passType = '',
       deviceId = '',
       checkpointId = '',
+      scanSource = '',
       dateFrom = '',
       dateTo = ''
     } = req.query;
@@ -81,6 +83,11 @@ async function getScanHistory(req, res, next) {
     if (checkpointId && checkpointId !== 'all') {
       whereConditions.push('sh.checkpoint_id = ?');
       queryParams.push(parseInt(checkpointId, 10));
+    }
+
+    if (scanSource && scanSource !== 'all') {
+      whereConditions.push('sh.scan_source = ?');
+      queryParams.push(scanSource);
     }
 
     if (search && search.trim()) {

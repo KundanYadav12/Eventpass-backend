@@ -99,12 +99,16 @@ async function processScan({
   operatorEventId = null,
   targetEventId = null,
   checkpointId = null,
+  scanSource = 'camera',
   ipAddress = null,
   customNow = null
 }) {
   const scanTime = customNow ? new Date(customNow) : new Date();
   const sqlScanTime = formatMySqlDateTime(scanTime);
   const cleanCode = (code || '').trim().toUpperCase();
+
+  const validScanSources = ['camera', 'manual entry', 'external USB scanner'];
+  const normalizedScanSource = validScanSources.includes(scanSource) ? scanSource : (scanSource || 'camera');
 
   if (!cleanCode) {
     return {
@@ -175,9 +179,9 @@ async function processScan({
       if (passes.length === 0) {
         // Record invalid scan attempt in scan_history
         await conn.query(
-          `INSERT INTO scan_history (pass_code, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, 'invalid', 'Pass code not found in database', ?)`,
-          [cleanCode, deviceId, operatorId, sqlScanTime, ipAddress]
+          `INSERT INTO scan_history (pass_code, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, 'invalid', 'Pass code not found in database', ?, ?)`,
+          [cleanCode, deviceId, operatorId, sqlScanTime, ipAddress, normalizedScanSource]
         );
 
         // Record confirmed Fraud Detection: PASS_NOT_FOUND
@@ -220,9 +224,9 @@ async function processScan({
         const fraudMsg = `⚠ OTHER EVENT PASS — This pass belongs to '${pass.event_name || 'Event #' + passEventId}'`;
 
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'invalid', ?, ?)`,
-          [activeEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, fraudReason, ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'invalid', ?, ?, ?)`,
+          [activeEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, fraudReason, ipAddress, normalizedScanSource]
         );
 
         // Record confirmed Fraud Detection: WRONG_EVENT
@@ -256,9 +260,9 @@ async function processScan({
       if (pass.event_status === 'inactive' || pass.event_status === 'completed') {
         const msg = `Event '${pass.event_name}' is not currently active.`;
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'invalid', ?, ?)`,
-          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'invalid', ?, ?, ?)`,
+          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress, normalizedScanSource]
         );
 
         return {
@@ -276,9 +280,9 @@ async function processScan({
       const isHmacValid = verifyHmacSignature(pass.code, pass.hmac_sig);
       if (!isHmacValid) {
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'invalid', 'HMAC signature verification failed - Possible counterfeit', ?)`,
-          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'invalid', 'HMAC signature verification failed - Possible counterfeit', ?, ?)`,
+          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, ipAddress, normalizedScanSource]
         );
 
         return {
@@ -293,9 +297,9 @@ async function processScan({
       if (pass.status === 'void') {
         const msg = await getMessage('PASS_VOIDED', 'This pass is voided and invalid. Entry denied.');
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'voided', ?, ?)`,
-          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'voided', ?, ?, ?)`,
+          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress, normalizedScanSource]
         );
 
         return {
@@ -318,9 +322,9 @@ async function processScan({
         const msg = (await getMessage('WRONG_DATE', defaultMsg)).replace('{date}', fromDateFormatted);
 
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'wrong_date', ?, ?)`,
-          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'wrong_date', ?, ?, ?)`,
+          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress, normalizedScanSource]
         );
 
         return {
@@ -345,9 +349,9 @@ async function processScan({
         );
 
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expired', ?, ?)`,
-          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expired', ?, ?, ?)`,
+          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress, normalizedScanSource]
         );
 
         const consumedCount = (pass.status === 'used' || pass.first_scanned_at) ? Math.max(1, pass.scan_count || 1) : (pass.scan_count || 0);
@@ -389,9 +393,9 @@ async function processScan({
         if (!checkpointRows || checkpointRows.length === 0) {
           const invalidChkMsg = 'Scan checkpoint not found or does not belong to this event.';
           await conn.query(
-            `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'invalid', ?, ?)`,
-            [passEventId, categoryId, checkpointId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, invalidChkMsg, ipAddress]
+            `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'invalid', ?, ?, ?)`,
+            [passEventId, categoryId, checkpointId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, invalidChkMsg, ipAddress, normalizedScanSource]
           );
 
           return {
@@ -421,9 +425,9 @@ async function processScan({
             if (!catMatch) {
               const catDenyMsg = `This pass (${pass.category_name || pass.code_type}) is not authorized for '${checkpoint.name}'.`;
               await conn.query(
-                `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'invalid', ?, ?)`,
-                [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, catDenyMsg, ipAddress]
+                `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'invalid', ?, ?, ?)`,
+                [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, catDenyMsg, ipAddress, normalizedScanSource]
               );
 
               return {
@@ -465,9 +469,9 @@ async function processScan({
             const timeDenyMsg = `${checkpoint.name} is open ${startFormatted} – ${endFormatted} IST. Entry not allowed right now.`;
 
             await conn.query(
-              `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'denied', ?, ?)`,
-              [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, timeDenyMsg, ipAddress]
+              `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'denied', ?, ?, ?)`,
+              [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, timeDenyMsg, ipAddress, normalizedScanSource]
             );
 
             return {
@@ -514,9 +518,9 @@ async function processScan({
           const reason = `First scanned at ${firstScanTimeIST} IST`;
 
           await conn.query(
-            `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'already_used', ?, ?)`,
-            [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, `${msg} (${reason})`, ipAddress]
+            `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'already_used', ?, ?, ?)`,
+            [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, `${msg} (${reason})`, ipAddress, normalizedScanSource]
           );
 
           // Update passes.last_scanned_at to record this latest scan attempt (first_scanned_at remains fixed)
@@ -574,9 +578,9 @@ async function processScan({
 
         const approvedMsg = `✓ ${checkpoint.name} Approved`;
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?)`,
-          [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, `${checkpoint.name} Entry Approved`, ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, checkpoint_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)`,
+          [passEventId, categoryId, checkpoint.id, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, `${checkpoint.name} Entry Approved`, ipAddress, normalizedScanSource]
         );
 
         return {
@@ -626,9 +630,9 @@ async function processScan({
           const msg = 'Pass Already Used — This pass is permanently expired and cannot be used again.';
 
           await conn.query(
-            `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'already_used', ?, ?)`,
-            [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, reason, ipAddress]
+            `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'already_used', ?, ?, ?)`,
+            [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, reason, ipAddress, normalizedScanSource]
           );
 
           // Update passes.last_scanned_at to record this latest scan attempt (first_scanned_at stays fixed!)
@@ -679,9 +683,9 @@ async function processScan({
 
         const msg = await getMessage('ENTRY_APPROVED', 'Entry Approved');
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?)`,
-          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, 'One-Time Pass Entry Approved', ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)`,
+          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, 'One-Time Pass Entry Approved', ipAddress, normalizedScanSource]
         );
 
         return {
@@ -722,9 +726,9 @@ async function processScan({
       if (cycle.status === 'expired') {
         const msg = `This pass has expired. Renewal active window ended on ${cycle.activeUntilIST}.`;
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expired', ?, ?)`,
-          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expired', ?, ?, ?)`,
+          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress, normalizedScanSource]
         );
 
         return {
@@ -741,9 +745,9 @@ async function processScan({
       if (cycle.status === 'future') {
         const msg = `Pass renewal is not yet active. Renewal window starts on ${cycle.activeFromIST}.`;
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'wrong_date', ?, ?)`,
-          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'wrong_date', ?, ?, ?)`,
+          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, msg, ipAddress, normalizedScanSource]
         );
 
         return {
@@ -767,9 +771,9 @@ async function processScan({
         const msg = `Pass Already Used Today. Unlocks at ${cycle.nextUnlockTimeFormatted}${windowSuffix}.`;
 
         await conn.query(
-          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'already_used', ?, ?)`,
-          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, reason, ipAddress]
+          `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'already_used', ?, ?, ?)`,
+          [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, reason, ipAddress, normalizedScanSource]
         );
 
         // Update passes.last_scanned_at to record this latest scan attempt
@@ -821,9 +825,9 @@ async function processScan({
 
       const approvedMsg = await getMessage('ENTRY_APPROVED', 'Entry Approved');
       await conn.query(
-        `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?)`,
-        [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, `Renewable Pass Entry Approved (Cycle: ${formatTimeIST(renewalTimeStr)})`, ipAddress]
+        `INSERT INTO scan_history (event_id, category_id, pass_id, pass_code, pass_type, device_id, operator_id, scan_time, result, reason, ip_address, scan_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)`,
+        [passEventId, categoryId, pass.id, pass.code, pass.code_type, deviceId, operatorId, sqlScanTime, `Renewable Pass Entry Approved (Cycle: ${formatTimeIST(renewalTimeStr)})`, ipAddress, normalizedScanSource]
       );
 
       return {

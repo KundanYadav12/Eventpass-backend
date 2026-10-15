@@ -193,7 +193,8 @@ async function getPublicConfig(req, res, next) {
     const result = await selfRegistrationService.getPublicRegistrationConfig(token);
 
     if (!result.success) {
-      return res.status(result.code === 'INVALID_TOKEN' || result.code === 'NOT_FOUND' ? 404 : 403).json(result);
+      const isNotFound = result.code === 'INVALID_TOKEN' || result.code === 'NOT_FOUND';
+      return res.status(isNotFound ? 404 : 200).json(result);
     }
 
     res.json(result);
@@ -218,7 +219,13 @@ async function submitRegistration(req, res, next) {
 
     res.status(200).json(result);
   } catch (error) {
-    next(error);
+    console.error(`[Self Registration Submit Error] Token: ${req.params?.token}:`, error.message);
+    const statusCode = error.statusCode || 400;
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Registration failed. Please check your details and try again.',
+      code: error.code || 'REGISTRATION_ERROR'
+    });
   }
 }
 

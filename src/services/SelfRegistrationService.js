@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const { query, withTransaction } = require('../config/db');
 const { generatePassCode, generateHmacSignature, generateSecureToken } = require('../utils/cryptoUtil');
 const { logAudit } = require('./AuditService');
@@ -5,6 +7,39 @@ const { generatePassPdf } = require('./pdfService');
 const eventDeliveryService = require('./eventDeliveryService');
 const { formatDateTimeIST, formatDateIST } = require('../utils/timeUtil');
 const { acquireLock } = require('../config/redis');
+
+/**
+ * Standardized HTTP error generator
+ */
+function createHttpError(message, statusCode = 400, code = 'BAD_REQUEST') {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  err.code = code;
+  return err;
+}
+
+/**
+ * Save base64 image data URL to public uploads directory
+ */
+function saveBase64Image(base64Data, filenamePrefix = 'attendee') {
+  if (!base64Data || typeof base64Data !== 'string' || !base64Data.startsWith('data:image')) {
+    return null;
+  }
+  const match = base64Data.match(/^data:image\/([a-zA-Z0-9\-\+\.]+);base64,(.+)$/);
+  if (!match) return null;
+
+  const rawExt = match[1].toLowerCase();
+  const ext = rawExt === 'jpeg' ? 'jpg' : rawExt.replace(/[^a-z0-9]/g, '');
+  const buffer = Buffer.from(match[2], 'base64');
+  const uploadDir = path.resolve(__dirname, '../../uploads/attendees');
+  if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  }
+  const filename = `${filenamePrefix}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext || 'jpg'}`;
+  const filePath = path.join(uploadDir, filename);
+  fs.writeFileSync(filePath, buffer);
+  return `/uploads/attendees/${filename}`;
+}
 
 /**
  * Validate phone number format (must be 10-15 digits after cleanup)
@@ -449,7 +484,8 @@ async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin =
   const selfReg = await getSelfRegistrationById(id, { eventId, isSuperAdmin });
 
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
-  const pageLimit = Math.min(500, Math.max(5, parseInt(limit, 10) || 50));
+  const isExportAll = limit === 'all' || parseInt(limit, 10) > 500 || parseInt(limit, 10) === -1;
+  const pageLimit = isExportAll ? 100000 : Math.min(500, Math.max(5, parseInt(limit, 10) || 50));
   const offset = (pageNum - 1) * pageLimit;
 
   const whereConditions = ['p.self_registration_id = ?'];
@@ -466,6 +502,24 @@ async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin =
   const countRes = await query(`SELECT COUNT(*) as total FROM passes p ${whereClause}`, queryParams);
   const totalRecords = countRes[0]?.total || 0;
   const totalPages = Math.ceil(totalRecords / pageLimit) || 1;
+
+  // Global counts for this self registration (independent of table filters)
+  const [totalRegRow] = await query(
+    `SELECT COUNT(*) as total_registered FROM passes WHERE self_registration_id = ?`,
+    [selfReg.id]
+  );
+  const totalRegisteredCount = totalRegRow?.total_registered || 0;
+
+  const [totalPresentRow] = await query(
+    `SELECT COUNT(DISTINCT p.id) as total_present
+     FROM passes p
+     WHERE p.self_registration_id = ?
+       AND (p.scan_count > 0 OR p.first_scanned_at IS NOT NULL OR EXISTS (
+         SELECT 1 FROM scan_history sh WHERE sh.pass_id = p.id AND sh.result = 'approved'
+       ))`,
+    [selfReg.id]
+  );
+  const totalPresentCount = totalPresentRow?.total_present || 0;
 
   const listSql = `
     SELECT 
@@ -504,28 +558,78 @@ async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin =
     [selfReg.event_id]
   );
 
-  // Fetch approved checkpoint scans for these passes
+  // Per-checkpoint scan counts across ALL registered attendees for this registration
+  const checkpointCountRows = await query(
+    `SELECT sh.checkpoint_id, COUNT(DISTINCT sh.pass_id) as scanned_count
+     FROM scan_history sh
+     JOIN passes p ON sh.pass_id = p.id
+     WHERE p.self_registration_id = ? AND sh.checkpoint_id IS NOT NULL AND sh.result = 'approved'
+     GROUP BY sh.checkpoint_id`,
+    [selfReg.id]
+  );
+  const checkpointCounts = {};
+  for (const ccr of checkpointCountRows) {
+    checkpointCounts[ccr.checkpoint_id] = Number(ccr.scanned_count) || 0;
+  }
+
+  // Fetch all operators who have scanned attendees for this registration
+  const availableOperators = await query(
+    `SELECT DISTINCT u.id, u.name, u.email
+     FROM scan_history sh
+     JOIN passes p ON sh.pass_id = p.id
+     JOIN users u ON sh.operator_id = u.id
+     WHERE p.self_registration_id = ? AND sh.result = 'approved'
+     ORDER BY u.name ASC`,
+    [selfReg.id]
+  );
+
+  // Fetch approved scans for these passes with operator details and scan sources
   const passIds = passes.map(p => p.id);
   const checkpointScansByPass = {};
+  const latestScanByPass = {};
 
   if (passIds.length > 0) {
     const placeholders = passIds.map(() => '?').join(',');
     const scanRows = await query(
-      `SELECT pass_id, checkpoint_id, MIN(scan_time) as first_scan_time, MAX(scan_time) as last_scan_time
-       FROM scan_history
-       WHERE pass_id IN (${placeholders}) AND checkpoint_id IS NOT NULL AND result = 'approved'
-       GROUP BY pass_id, checkpoint_id`,
+      `SELECT sh.id, sh.pass_id, sh.checkpoint_id, sh.scan_time, sh.operator_id,
+              u.name as operator_name, u.email as operator_email,
+              sh.scan_source, sh.device_id
+       FROM scan_history sh
+       LEFT JOIN users u ON sh.operator_id = u.id
+       WHERE sh.pass_id IN (${placeholders}) AND sh.result = 'approved'
+       ORDER BY sh.scan_time ASC, sh.id ASC`,
       passIds
     );
 
     for (const sr of scanRows) {
-      if (!checkpointScansByPass[sr.pass_id]) {
-        checkpointScansByPass[sr.pass_id] = {};
+      if (sr.checkpoint_id) {
+        if (!checkpointScansByPass[sr.pass_id]) {
+          checkpointScansByPass[sr.pass_id] = {};
+        }
+        // First approved scan at this checkpoint
+        if (!checkpointScansByPass[sr.pass_id][sr.checkpoint_id]) {
+          checkpointScansByPass[sr.pass_id][sr.checkpoint_id] = {
+            scanned: true,
+            firstScanTime: sr.scan_time,
+            firstScanTimeIST: formatDateTimeIST(sr.scan_time),
+            operatorId: sr.operator_id,
+            operatorName: sr.operator_name || 'Operator',
+            operatorEmail: sr.operator_email || null,
+            scanSource: sr.scan_source || 'camera',
+            deviceId: sr.device_id
+          };
+        }
       }
-      checkpointScansByPass[sr.pass_id][sr.checkpoint_id] = {
-        scanned: true,
-        firstScanTime: sr.first_scan_time,
-        firstScanTimeIST: formatDateTimeIST(sr.first_scan_time)
+
+      // Latest scan overall for this pass
+      latestScanByPass[sr.pass_id] = {
+        scanTime: sr.scan_time,
+        scanTimeIST: formatDateTimeIST(sr.scan_time),
+        operatorId: sr.operator_id,
+        operatorName: sr.operator_name || 'Operator',
+        operatorEmail: sr.operator_email || null,
+        scanSource: sr.scan_source || 'camera',
+        deviceId: sr.device_id
       };
     }
   }
@@ -540,7 +644,14 @@ async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin =
     }
 
     const scans = checkpointScansByPass[p.id] || {};
+    const latest = latestScanByPass[p.id] || null;
     const hasAnyScan = (p.scan_count > 0) || Boolean(p.first_scanned_at) || Object.keys(scans).length > 0;
+
+    const scannedBy = latest ? {
+      id: latest.operatorId,
+      name: latest.operatorName,
+      email: latest.operatorEmail
+    } : null;
 
     return {
       id: p.id,
@@ -567,6 +678,9 @@ async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin =
       createdAt: p.created_at,
       downloadToken: p.download_token,
       checkpointScans: scans,
+      scannedBy,
+      scanSource: latest ? latest.scanSource : null,
+      latestScan: latest,
       isPresent: hasAnyScan
     };
   });
@@ -584,7 +698,9 @@ async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin =
       title: selfReg.title,
       eventName: selfReg.event_name,
       categoryName: selfReg.category_name,
-      totalIssued: totalRecords
+      totalIssued: totalRecords,
+      totalRegistered: totalRegisteredCount,
+      totalPresent: totalPresentCount
     },
     checkpoints: checkpoints.map(c => ({
       id: c.id,
@@ -592,8 +708,10 @@ async function getSelfRegistrationAttendees(id, { eventId = null, isSuperAdmin =
       code: c.code,
       checkpointType: c.checkpoint_type,
       startTime: c.start_time,
-      endTime: c.end_time
+      endTime: c.end_time,
+      scannedCount: checkpointCounts[c.id] || 0
     })),
+    availableOperators,
     customFields,
     passes: formattedPasses,
     pagination: {
@@ -759,7 +877,7 @@ async function getPublicRegistrationConfig(publicToken) {
  */
 async function registerCustomer(publicToken, formData, { ipAddress = null, userAgent = null, baseUrl = null } = {}) {
   if (!publicToken || typeof publicToken !== 'string') {
-    throw new Error('Registration token is required');
+    throw createHttpError('Registration token is required', 400, 'INVALID_TOKEN');
   }
 
   const {
@@ -798,60 +916,60 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
   );
 
   if (!rows || rows.length === 0) {
-    throw new Error('Registration link is no longer available.');
+    throw createHttpError('Registration link is no longer available.', 404, 'NOT_FOUND');
   }
 
   const selfReg = rows[0];
 
   if (selfReg.status !== 'ACTIVE') {
-    throw new Error('Registration is currently closed for this event.');
+    throw createHttpError('Registration is currently closed for this event.', 403, 'REGISTRATION_CLOSED');
   }
 
   // Active Window check
   const now = new Date();
   if (selfReg.starts_at && now < new Date(selfReg.starts_at)) {
-    throw new Error('Registration has not opened yet.');
+    throw createHttpError('Registration has not opened yet.', 403, 'REGISTRATION_NOT_STARTED');
   }
   if (selfReg.ends_at && now > new Date(selfReg.ends_at)) {
-    throw new Error('Registration for this event has closed.');
+    throw createHttpError('Registration for this event has closed.', 403, 'REGISTRATION_EXPIRED');
   }
 
   // Capacity check
   if (selfReg.max_registrations && selfReg.registration_count >= selfReg.max_registrations) {
-    throw new Error('Registration capacity for this pass has been reached.');
+    throw createHttpError('Registration capacity for this pass has been reached.', 409, 'CAPACITY_REACHED');
   }
 
   // 2. Validate Customer Fields
   const cleanName = (name || '').trim();
   if (selfReg.require_name && cleanName.length < 2) {
-    throw new Error('Full Name is required (minimum 2 characters).');
+    throw createHttpError('Full Name is required (minimum 2 characters).', 400, 'VALIDATION_ERROR');
   }
 
   const cleanPhone = normalizePhoneNumber(phone);
   const isPhoneMandatory = selfReg.require_phone || selfReg.delivery_channel === 'WHATSAPP' || selfReg.delivery_channel === 'BOTH';
   if (isPhoneMandatory && !cleanPhone) {
-    throw new Error('A valid 10-digit mobile / WhatsApp number is required.');
+    throw createHttpError('A valid 10-digit mobile / WhatsApp number is required.', 400, 'VALIDATION_ERROR');
   }
 
   const cleanEmail = email && typeof email === 'string' ? email.trim().toLowerCase() : '';
   const isEmailMandatory = selfReg.require_email || selfReg.delivery_channel === 'EMAIL' || selfReg.delivery_channel === 'BOTH';
   if (isEmailMandatory && !isValidEmail(cleanEmail)) {
-    throw new Error('A valid email address is required.');
+    throw createHttpError('A valid email address is required.', 400, 'VALIDATION_ERROR');
   }
 
   const cleanAddress = address && typeof address === 'string' ? address.trim() : null;
   if (selfReg.require_address && (!cleanAddress || cleanAddress.length < 3)) {
-    throw new Error('Address is required.');
+    throw createHttpError('Address is required.', 400, 'VALIDATION_ERROR');
   }
 
   const cleanGender = gender && typeof gender === 'string' ? gender.trim() : null;
   if (selfReg.require_gender && !cleanGender) {
-    throw new Error('Gender is required.');
+    throw createHttpError('Gender is required.', 400, 'VALIDATION_ERROR');
   }
 
   const parsedAge = age !== undefined && age !== null && age !== '' ? parseInt(age, 10) : null;
   if (selfReg.require_age && (!parsedAge || parsedAge < 1 || parsedAge > 120)) {
-    throw new Error('Please enter a valid age.');
+    throw createHttpError('Please enter a valid age.', 400, 'VALIDATION_ERROR');
   }
 
   // Validate dynamic form fields configured for this registration
@@ -865,16 +983,17 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
             if (field.type === 'image') {
               const imgVal = photoUrl || val;
               if (!imgVal) {
-                throw new Error(`${field.label || 'Image upload'} is required.`);
+                throw createHttpError(`${field.label || 'Image upload'} is required.`, 400, 'VALIDATION_ERROR');
               }
             } else if (val === null || val === undefined || String(val).trim() === '' || (Array.isArray(val) && val.length === 0)) {
-              throw new Error(`${field.label || 'Field'} is required.`);
+              throw createHttpError(`${field.label || 'Field'} is required.`, 400, 'VALIDATION_ERROR');
             }
           }
         }
       }
     } catch (e) {
-      if (e.message && e.message.includes('required')) throw e;
+      if (e.statusCode) throw e;
+      if (e.message && e.message.includes('required')) throw createHttpError(e.message, 400, 'VALIDATION_ERROR');
     }
   }
 
@@ -893,15 +1012,28 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
   if (finalPhotoUrl && typeof finalPhotoUrl === 'string' && finalPhotoUrl.startsWith('data:image')) {
     const mimeMatch = finalPhotoUrl.match(/^data:(image\/[a-zA-Z0-9\-\+\.]+);base64,/i);
     if (!mimeMatch) {
-      throw new Error('Invalid image format. Supported formats: JPEG, PNG, WebP.');
+      throw createHttpError('Invalid image format. Supported formats: JPEG, PNG, WebP.', 400, 'INVALID_IMAGE');
     }
     const mime = mimeMatch[1].toLowerCase();
     if (!['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(mime)) {
-      throw new Error(`Unsupported image format (${mime}). Allowed formats: JPG, PNG, WebP.`);
+      throw createHttpError(`Unsupported image format (${mime}). Allowed formats: JPG, PNG, WebP.`, 400, 'UNSUPPORTED_IMAGE_FORMAT');
     }
     const byteSize = getBase64ByteSize(finalPhotoUrl);
     if (byteSize > 500 * 1024) {
-      throw new Error(`Uploaded image exceeds 500 KB limit (${Math.round(byteSize / 1024)} KB). Please compress or choose a smaller image.`);
+      throw createHttpError(`Uploaded image exceeds 500 KB limit (${Math.round(byteSize / 1024)} KB). Please compress or choose a smaller image.`, 400, 'IMAGE_TOO_LARGE');
+    }
+  }
+
+  // Persist base64 photo to static uploads disk directory
+  let storedPhotoUrl = finalPhotoUrl;
+  if (finalPhotoUrl && typeof finalPhotoUrl === 'string' && finalPhotoUrl.startsWith('data:image')) {
+    try {
+      const savedPath = saveBase64Image(finalPhotoUrl, `attendee_${selfReg.id}`);
+      if (savedPath) {
+        storedPhotoUrl = savedPath;
+      }
+    } catch (saveErr) {
+      console.warn('[Self Registration] Photo disk save error:', saveErr.message);
     }
   }
 
@@ -1005,6 +1137,9 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
       const billNumber = `SELF-${new Date().getFullYear()}-${String(nextNum).padStart(4, '0')}`;
       const downloadToken = generateSecureToken(16);
 
+      const validSharingMethods = ['EMAIL', 'WHATSAPP', 'BOTH'];
+      const sanitizedDeliveryChannel = validSharingMethods.includes(selfReg.delivery_channel) ? selfReg.delivery_channel : 'BOTH';
+
       const [billRes] = await conn.query(
         `INSERT INTO billings (
           bill_number, download_token, event_id, category_id, style_id,
@@ -1022,7 +1157,7 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
           cleanName,
           cleanEmail || null,
           cleanPhone || null,
-          selfReg.delivery_channel,
+          sanitizedDeliveryChannel,
           selfReg.id
         ]
       );
@@ -1032,6 +1167,11 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
       // Generate strictly unique 7-char pass code with HMAC
       const code = generatePassCode();
       const hmac = generateHmacSignature(code);
+
+      const passValidFrom = selfReg.valid_from || new Date();
+      const passValidUntil = selfReg.valid_until || new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+      const codeType = selfReg.category_code || 'GENERAL';
+      const categoryPrefix = selfReg.category_prefix || '';
 
       const [passRes] = await conn.query(
         `INSERT INTO passes (
@@ -1053,11 +1193,11 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
           selfReg.event_id,
           selfReg.category_id,
           code,
-          selfReg.category_code,
-          selfReg.category_prefix || '',
+          codeType,
+          categoryPrefix,
           hmac,
-          selfReg.valid_from,
-          selfReg.valid_until,
+          passValidFrom,
+          passValidUntil,
           billingId,
           style?.id || null,
           cleanName,
@@ -1066,9 +1206,9 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
           cleanAddress,
           cleanGender,
           parsedAge,
-          finalPhotoUrl,
+          storedPhotoUrl || finalPhotoUrl,
           customFieldsData ? JSON.stringify(customFieldsData) : null,
-          selfReg.delivery_channel,
+          sanitizedDeliveryChannel,
           selfReg.id
         ]
       );
@@ -1081,25 +1221,30 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
       // Increment category total quantity
       await conn.query('UPDATE pass_categories SET total_quantity = total_quantity + 1 WHERE id = ?', [selfReg.category_id]);
 
-      // Audit Log
-      await conn.query(
-        `INSERT INTO audit_log (event_id, user_id, user_name, action, entity, entity_id, new_value, ip_address, user_agent, created_at)
-         VALUES (?, NULL, 'Self-Registered Customer', 'SELF_REGISTRATION_PASS_ISSUE', 'PASS', ?, ?, ?, ?, NOW())`,
-        [
-          selfReg.event_id,
-          String(passId),
-          JSON.stringify({
-            selfRegistrationId: selfReg.id,
-            passCode: code,
-            customerName: cleanName,
-            customerPhone: cleanPhone,
-            customerEmail: cleanEmail,
-            deliveryChannel: selfReg.delivery_channel
-          }),
-          ipAddress,
-          userAgent
-        ]
-      );
+      // Audit Log (Safely truncated to prevent VARCHAR(255) overflows)
+      try {
+        const safeUserAgent = userAgent ? String(userAgent).substring(0, 255) : null;
+        await conn.query(
+          `INSERT INTO audit_log (event_id, user_id, user_name, action, entity, entity_id, new_value, ip_address, user_agent, created_at)
+           VALUES (?, NULL, 'Self-Registered Customer', 'SELF_REGISTRATION_PASS_ISSUE', 'PASS', ?, ?, ?, ?, NOW())`,
+          [
+            selfReg.event_id,
+            String(passId),
+            JSON.stringify({
+              selfRegistrationId: selfReg.id,
+              passCode: code,
+              customerName: cleanName,
+              customerPhone: cleanPhone,
+              customerEmail: cleanEmail,
+              deliveryChannel: sanitizedDeliveryChannel
+            }),
+            ipAddress,
+            safeUserAgent
+          ]
+        );
+      } catch (auditErr) {
+        console.warn('[Self Registration] Non-blocking audit log warning:', auditErr.message);
+      }
 
       return {
         passId,
@@ -1236,22 +1381,29 @@ async function registerCustomer(publicToken, formData, { ipAddress = null, userA
 
     // Record in pass_communication_history
     const historyStatus = (emailDelivery.status === 'SENT' || whatsappDelivery.status === 'READY') ? 'SENT' : 'READY';
-    await query(
-      `INSERT INTO pass_communication_history (
-        pass_id, event_id, billing_id, customer_name, customer_email, customer_phone,
-        sharing_method, status, shared_by, shared_by_name, notes, shared_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'Self-Registration Automated Delivery', 'Customer self-registered via public link', NOW(), NOW())`,
-      [
-        result.passId,
-        selfReg.event_id,
-        result.billingId,
-        cleanName,
-        cleanEmail || null,
-        cleanPhone || null,
-        selfReg.delivery_channel,
-        historyStatus
-      ]
-    );
+    const validSharingMethods = ['EMAIL', 'WHATSAPP', 'BOTH'];
+    const sanitizedDeliveryChannel = validSharingMethods.includes(selfReg.delivery_channel) ? selfReg.delivery_channel : 'BOTH';
+
+    try {
+      await query(
+        `INSERT INTO pass_communication_history (
+          pass_id, event_id, billing_id, customer_name, customer_email, customer_phone,
+          sharing_method, status, shared_by, shared_by_name, notes, shared_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'Self-Registration Automated Delivery', 'Customer self-registered via public link', NOW(), NOW())`,
+        [
+          result.passId,
+          selfReg.event_id,
+          result.billingId,
+          cleanName,
+          cleanEmail || null,
+          cleanPhone || null,
+          sanitizedDeliveryChannel,
+          historyStatus
+        ]
+      );
+    } catch (historyErr) {
+      console.warn('[Self Registration] Non-blocking communication history warning:', historyErr.message);
+    }
 
     return {
       success: true,
